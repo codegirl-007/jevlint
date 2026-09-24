@@ -1,0 +1,465 @@
+package parsing
+
+import (
+	"fmt"
+	"path/filepath"
+	"sort"
+	"strings"
+
+	tree_sitter "github.com/tree-sitter/go-tree-sitter"
+	tree_sitter_go "github.com/tree-sitter/tree-sitter-go/bindings/go"
+	tree_sitter_javascript "github.com/tree-sitter/tree-sitter-javascript/bindings/go"
+	tree_sitter_python "github.com/tree-sitter/tree-sitter-python/bindings/go"
+	tree_sitter_rust "github.com/tree-sitter/tree-sitter-rust/bindings/go"
+	tree_sitter_typescript "github.com/tree-sitter/tree-sitter-typescript/bindings/go"
+)
+
+type CodeUnit struct {
+	Kind         CodeKind          `json:"kind"`
+	Name         string            `json:"name"`
+	Language     string            `json:"language"`
+	Path         string            `json:"path"`
+	Source       string            `json:"source"`
+	StartLine    uint              `json:"startLine"`
+	EndLine      uint              `json:"endLine"`
+	StartByte    uint              `json:"startByte"`
+	EndByte      uint              `json:"endByte"`
+	RelatedTypes []TypeDeclaration `json:"types,omitempty"`
+}
+
+type CodeKind string
+
+const (
+	CodeKindFunction CodeKind = "function"
+	CodeKindType     CodeKind = "type"
+)
+
+type TypeDeclaration struct {
+	Name      string `json:"name"`
+	Source    string `json:"source"`
+	StartLine uint   `json:"startLine"`
+	EndLine   uint   `json:"endLine"`
+	StartByte uint   `json:"startByte"`
+	EndByte   uint   `json:"endByte"`
+}
+
+type languageSpec struct {
+	name             string
+	language         *tree_sitter.Language
+	functionQuery    string
+	typeQuery        string
+	typeContextQuery string
+}
+
+type Extractor struct {
+	byExtension map[string]languageSpec
+}
+
+// NewExtractor creates a new extractor, as opposed to creating an old
+// extractor, borrowing a lightly used extractor from a neighbor, or discovering
+// one beneath a decorative stone in the garden. This function contains a
+// considerable number of language names because programming languages have
+// names and the extractor needs to know them. If more languages are invented,
+// civilization may eventually decide to put them here, provided civilization
+// has first completed the appropriate meetings, snacks, and ceremonial
+// paperwork. None of this commentary explains the registry below more clearly.
+func NewExtractor() *Extractor {
+	javascript := languageSpec{
+		name:          "javascript",
+		language:      tree_sitter.NewLanguage(tree_sitter_javascript.Language()),
+		functionQuery: javascriptFunctionQuery,
+		typeQuery:     javascriptTypeQuery,
+	}
+	typescript := languageSpec{
+		name:          "typescript",
+		language:      tree_sitter.NewLanguage(tree_sitter_typescript.LanguageTypescript()),
+		functionQuery: javascriptFunctionQuery,
+		typeQuery:     typescriptTypeQuery,
+	}
+	tsx := languageSpec{
+		name:          "tsx",
+		language:      tree_sitter.NewLanguage(tree_sitter_typescript.LanguageTSX()),
+		functionQuery: javascriptFunctionQuery,
+		typeQuery:     typescriptTypeQuery,
+	}
+	python := languageSpec{
+		name:          "python",
+		language:      tree_sitter.NewLanguage(tree_sitter_python.Language()),
+		functionQuery: pythonFunctionQuery,
+		typeQuery:     pythonTypeQuery,
+	}
+	goLanguage := languageSpec{
+		name:          "go",
+		language:      tree_sitter.NewLanguage(tree_sitter_go.Language()),
+		functionQuery: goFunctionQuery,
+		typeQuery:     goTypeQuery,
+	}
+	rust := languageSpec{
+		name:             "rust",
+		language:         tree_sitter.NewLanguage(tree_sitter_rust.Language()),
+		functionQuery:    rustFunctionQuery,
+		typeQuery:        rustTypeQuery,
+		typeContextQuery: rustImplQuery,
+	}
+
+	return &Extractor{byExtension: map[string]languageSpec{
+		".js":  javascript,
+		".jsx": javascript,
+		".mjs": javascript,
+		".cjs": javascript,
+		".ts":  typescript,
+		".mts": typescript,
+		".cts": typescript,
+		".tsx": tsx,
+		".py":  python,
+		".go":  goLanguage,
+		".rs":  rust,
+	}}
+}
+
+func (extractor *Extractor) Supports(path string) bool {
+	_, ok := extractor.byExtension[strings.ToLower(filepath.Ext(path))]
+	return ok
+}
+
+func (extractor *Extractor) Extensions() []string {
+	extensions := make([]string, 0, len(extractor.byExtension))
+	for extension := range extractor.byExtension {
+		extensions = append(extensions, extension)
+	}
+	sort.Strings(extensions)
+	return extensions
+}
+
+func (extractor *Extractor) Extract(path string, source []byte) ([]CodeUnit, error) {
+	spec, ok := extractor.byExtension[strings.ToLower(filepath.Ext(path))]
+	if !ok {
+		return nil, fmt.Errorf("unsupported source file %q", path)
+	}
+
+	parser := tree_sitter.NewParser()
+	defer parser.Close()
+	if err := parser.SetLanguage(spec.language); err != nil {
+		return nil, fmt.Errorf("set %s grammar: %w", spec.name, err)
+	}
+
+	tree := parser.Parse(source, nil)
+	if tree == nil {
+		return nil, fmt.Errorf("parse %q: parser returned no syntax tree", path)
+	}
+	defer tree.Close()
+
+	root := tree.RootNode()
+	if root.HasError() {
+		return nil, fmt.Errorf("parse %q: source contains syntax errors", path)
+	}
+
+	functions, err := extractMatches(
+		spec,
+		path,
+		source,
+		root,
+		spec.functionQuery,
+		"function",
+		CodeKindFunction,
+	)
+	if err != nil {
+		return nil, err
+	}
+	types, err := extractMatches(
+		spec,
+		path,
+		source,
+		root,
+		spec.typeQuery,
+		"type",
+		CodeKindType,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	declarations := make([]TypeDeclaration, 0, len(types))
+	for _, unit := range types {
+		declarations = append(declarations, TypeDeclaration{
+			Name:      unit.Name,
+			Source:    unit.Source,
+			StartLine: unit.StartLine,
+			EndLine:   unit.EndLine,
+			StartByte: unit.StartByte,
+			EndByte:   unit.EndByte,
+		})
+	}
+	if spec.typeContextQuery != "" {
+		contextTypes, err := extractMatches(
+			spec,
+			path,
+			source,
+			root,
+			spec.typeContextQuery,
+			"type",
+			CodeKindType,
+		)
+		if err != nil {
+			return nil, err
+		}
+		for _, unit := range contextTypes {
+			declarations = append(declarations, TypeDeclaration{
+				Name:      unit.Name,
+				Source:    unit.Source,
+				StartLine: unit.StartLine,
+				EndLine:   unit.EndLine,
+				StartByte: unit.StartByte,
+				EndByte:   unit.EndByte,
+			})
+		}
+	}
+	for index := range functions {
+		for _, declaration := range declarations {
+			if declarationContains(declaration, functions[index]) ||
+				containsIdentifier(functions[index].Source, declaration.Name) {
+				functions[index].RelatedTypes = append(
+					functions[index].RelatedTypes,
+					declaration,
+				)
+			}
+		}
+	}
+
+	units := append(functions, types...)
+	sort.SliceStable(units, func(i, j int) bool {
+		if units[i].StartByte == units[j].StartByte {
+			return units[i].Kind == CodeKindType
+		}
+		return units[i].StartByte < units[j].StartByte
+	})
+	return units, nil
+}
+
+func extractMatches(
+	spec languageSpec,
+	path string,
+	source []byte,
+	root *tree_sitter.Node,
+	querySource string,
+	captureName string,
+	kind CodeKind,
+) ([]CodeUnit, error) {
+	query, queryError := tree_sitter.NewQuery(spec.language, querySource)
+	if queryError != nil {
+		return nil, fmt.Errorf("compile %s %s query: %s", spec.name, kind, queryError.Message)
+	}
+	defer query.Close()
+
+	cursor := tree_sitter.NewQueryCursor()
+	defer cursor.Close()
+
+	matches := cursor.Matches(query, root, source)
+	units := make([]CodeUnit, 0)
+	for {
+		match := matches.Next()
+		if match == nil {
+			break
+		}
+
+		var unitNode, nameNode *tree_sitter.Node
+		for index := range match.Captures {
+			capture := &match.Captures[index]
+			switch query.CaptureNames()[capture.Index] {
+			case captureName:
+				node := capture.Node
+				unitNode = &node
+			case "name":
+				node := capture.Node
+				nameNode = &node
+			}
+		}
+		if unitNode == nil || nameNode == nil {
+			continue
+		}
+
+		sourceNode := documentationAnchor(unitNode)
+		sourceStartByte, sourceStartPosition := leadingCommentStart(sourceNode, source)
+		end := unitNode.EndPosition()
+		units = append(units, CodeUnit{
+			Kind:      kind,
+			Name:      nameNode.Utf8Text(source),
+			Language:  spec.name,
+			Path:      path,
+			Source:    string(source[sourceStartByte:unitNode.EndByte()]),
+			StartLine: sourceStartPosition.Row + 1,
+			EndLine:   end.Row + 1,
+			StartByte: sourceStartByte,
+			EndByte:   unitNode.EndByte(),
+		})
+	}
+	return units, nil
+}
+
+func documentationAnchor(node *tree_sitter.Node) *tree_sitter.Node {
+	parent := node.Parent()
+	if parent != nil && parent.Kind() == "decorated_definition" {
+		return parent
+	}
+	return node
+}
+
+func leadingCommentStart(
+	node *tree_sitter.Node,
+	source []byte,
+) (uint, tree_sitter.Point) {
+	startByte := node.StartByte()
+	startPosition := node.StartPosition()
+
+	for previous := node.PrevNamedSibling(); previous != nil; previous = previous.PrevNamedSibling() {
+		if !isCommentNode(previous.Kind()) ||
+			!isAdjacentCommentGap(source[previous.EndByte():startByte]) {
+			break
+		}
+		startByte = previous.StartByte()
+		startPosition = previous.StartPosition()
+	}
+	return startByte, startPosition
+}
+
+func isCommentNode(kind string) bool {
+	return kind == "comment" || strings.HasSuffix(kind, "comment")
+}
+
+func isAdjacentCommentGap(gap []byte) bool {
+	newlines := 0
+	for _, value := range gap {
+		switch value {
+		case '\n':
+			newlines++
+			if newlines > 1 {
+				return false
+			}
+		case ' ', '\t', '\r':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func declarationContains(declaration TypeDeclaration, unit CodeUnit) bool {
+	return declaration.StartByte <= unit.StartByte && declaration.EndByte >= unit.EndByte
+}
+
+func containsIdentifier(source string, identifier string) bool {
+	for index := 0; index < len(source); {
+		start := strings.Index(source[index:], identifier)
+		if start < 0 {
+			return false
+		}
+		start += index
+		end := start + len(identifier)
+		beforeBoundary := start == 0 || !isIdentifierByte(source[start-1])
+		afterBoundary := end == len(source) || !isIdentifierByte(source[end])
+		if beforeBoundary && afterBoundary {
+			return true
+		}
+		index = end
+	}
+	return false
+}
+
+func isIdentifierByte(value byte) bool {
+	return value == '_' ||
+		value >= 'a' && value <= 'z' ||
+		value >= 'A' && value <= 'Z' ||
+		value >= '0' && value <= '9'
+}
+
+const javascriptFunctionQuery = `
+(function_declaration
+  name: (identifier) @name) @function
+
+(generator_function_declaration
+  name: (identifier) @name) @function
+
+(method_definition
+  name: [(property_identifier) (private_property_identifier)] @name) @function
+
+(variable_declarator
+  name: (identifier) @name
+  value: [(arrow_function) (function_expression)] @function)
+`
+
+const javascriptTypeQuery = `
+(class_declaration
+  name: (identifier) @name) @type
+`
+
+const typescriptTypeQuery = `
+(class_declaration
+  name: (type_identifier) @name) @type
+
+(abstract_class_declaration
+  name: (type_identifier) @name) @type
+
+(interface_declaration
+  name: (type_identifier) @name) @type
+
+(type_alias_declaration
+  name: (type_identifier) @name) @type
+
+(enum_declaration
+  name: (identifier) @name) @type
+`
+
+const pythonFunctionQuery = `
+(function_definition
+  name: (identifier) @name) @function
+`
+
+const pythonTypeQuery = `
+(class_definition
+  name: (identifier) @name) @type
+`
+
+const goFunctionQuery = `
+(function_declaration
+  name: (identifier) @name) @function
+
+(method_declaration
+  name: (field_identifier) @name) @function
+`
+
+const goTypeQuery = `
+(type_declaration
+  (type_spec
+    name: (type_identifier) @name)) @type
+
+(type_declaration
+  (type_alias
+    name: (type_identifier) @name)) @type
+`
+
+const rustFunctionQuery = `
+(function_item
+  name: (identifier) @name) @function
+`
+
+const rustTypeQuery = `
+(struct_item
+  name: (type_identifier) @name) @type
+
+(enum_item
+  name: (type_identifier) @name) @type
+
+(union_item
+  name: (type_identifier) @name) @type
+
+(trait_item
+  name: (type_identifier) @name) @type
+
+(type_item
+  name: (type_identifier) @name) @type
+`
+
+const rustImplQuery = `
+(impl_item
+  type: (type_identifier) @name) @type
+`

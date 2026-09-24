@@ -1,0 +1,55 @@
+{
+  "rules": [
+    {
+      "id": "database-joins",
+      "description": "When related records come from the same database, combine them in the database query rather than matching, merging, or enriching them in application code.",
+      "severity": "error",
+      "include": [
+        "**/*.js",
+        "**/*.jsx",
+        "**/*.ts",
+        "**/*.tsx",
+        "**/*.py",
+        "**/*.go",
+        "**/*.rs"
+      ],
+      "exclude": [
+        "**/*_test.go",
+        "**/*.test.js",
+        "**/*.test.ts"
+      ],
+      "exceptions": [
+        "The data comes from different services or databases.",
+        "The join cannot reasonably be expressed by the database or ORM."
+      ]
+    },
+    {
+      "id": "boolean-property-prefix",
+      "description": "For type declarations, every boolean property or field name must begin with Is or Should. Code units that are not type declarations pass this rule.",
+      "severity": "error",
+      "include": [
+        "**/*.js",
+        "**/*.jsx",
+        "**/*.ts",
+        "**/*.tsx",
+        "**/*.py",
+        "**/*.go",
+        "**/*.rs"
+      ]
+    },
+    {
+      "id": "comment-quality",
+      "description": "Comments should be helpful and concise without focusing too much on what the code is doing.",
+      "severity": "warning",
+      "include": [
+        "**/*.js",
+        "**/*.jsx",
+        "**/*.ts",
+        "**/*.tsx",
+        "**/*.py",
+        "**/*.go",
+        "**/*.rs"
+      ]
+    }
+  ]
+}
