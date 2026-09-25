@@ -144,6 +144,31 @@ func TestWriteTextHighlightsRuleAndSnippet(t *testing.T) {
 	}
 }
 
+func TestWriteCodeFrameAdjustsColumnsForMidLineSnippet(t *testing.T) {
+	t.Parallel()
+
+	finding := runner.Finding{
+		Severity:    config.SeverityError,
+		Language:    "go",
+		StartLine:   3,
+		EndLine:     3,
+		StartColumn: 4,
+		Snippet:     "Ready bool",
+		Locations: []runner.Location{{
+			StartLine:   3,
+			EndLine:     3,
+			StartColumn: 4,
+			EndColumn:   9,
+		}},
+	}
+	var output bytes.Buffer
+	writeCodeFrame(&output, outputStyle{}, finding)
+
+	if !strings.Contains(output.String(), "    │ ^^^^^") {
+		t.Fatalf("output = %q, want pointer at start of focused snippet", output.String())
+	}
+}
+
 func TestWriteSummaryAndTotals(t *testing.T) {
 	t.Parallel()
 

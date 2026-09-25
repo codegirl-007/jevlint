@@ -14,7 +14,7 @@ func TestDecodeValidConfig(t *testing.T) {
 			"description": "Join related database records in the database.",
 			"severity": "error",
 			"include": ["**/*.go"],
-			"kinds": ["function"],
+			"kinds": ["comment", "field", "function", "statement", "type"],
 			"localize": ["statement"]
 		}]
 	}`)))
@@ -153,7 +153,8 @@ func TestDecodeValidationErrors(t *testing.T) {
 				"severity": "info",
 				"kinds": ["banana"]
 			}]}`,
-			want: `rules[0].kinds contains invalid kind "banana"; want function or type`,
+			want: `rules[0].kinds contains invalid kind "banana"; ` +
+				"want comment, field, function, statement, or type",
 		},
 	}
 

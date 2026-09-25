@@ -49,7 +49,7 @@
       "id": "boolean-property-naming",
       "description": "Boolean property and field names should make the true state clear while following the language's conventions. Predicate prefixes such as Is, Has, Can, or Should and positive state names such as Enabled, Ready, or Visible pass. Concise domain names also pass when the containing type makes their meaning unambiguous, such as color on outputStyle. Fail vague names such as Flag, Value, or Data, misleading names, and negative names that create double negatives. Do not require an Is or Should prefix.",
       "severity": "error",
-      "kinds": ["type"],
+      "kinds": ["field"],
       "include": ["**/*"],
       "exclude": [
         "**/examples/**",
@@ -69,13 +69,13 @@
         "**/test_*.py",
         "**/*_test.py"
       ],
-      "localize": ["field"]
+      "localize": []
     },
     {
       "id": "comment-quality",
       "description": "Comments should be helpful and concise without focusing too much on what the code is doing.",
       "severity": "warning",
-      "kinds": ["function", "type"],
+      "kinds": ["comment"],
       "include": ["**/*"],
       "exclude": [
         "**/examples/**",
@@ -95,7 +95,7 @@
         "**/test_*.py",
         "**/*_test.py"
       ],
-      "localize": ["comment"]
+      "localize": []
     },
     {
       "id": "redundant-if-statements",

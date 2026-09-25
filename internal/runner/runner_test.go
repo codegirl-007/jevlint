@@ -30,6 +30,10 @@ type cacheStatsEvaluator struct {
 	stats evaluation.CacheStats
 }
 
+type failingRecordingEvaluator struct {
+	batches []evaluation.Batch
+}
+
 func (booleanFieldEvaluator) Evaluate(
 	_ context.Context,
 	batch evaluation.Batch,
@@ -113,6 +117,21 @@ func (evaluator *cacheStatsEvaluator) Evaluate(
 
 func (evaluator *cacheStatsEvaluator) CacheStats() evaluation.CacheStats {
 	return evaluator.stats
+}
+
+func (evaluator *failingRecordingEvaluator) Evaluate(
+	_ context.Context,
+	batch evaluation.Batch,
+) (map[string]evaluation.Result, error) {
+	evaluator.batches = append(evaluator.batches, batch)
+	results := make(map[string]evaluation.Result, len(batch.Rules))
+	for _, rule := range batch.Rules {
+		results[rule.ID] = evaluation.Result{
+			Status:     evaluation.StatusFail,
+			Confidence: 1,
+		}
+	}
+	return results, nil
 }
 
 func TestCheckBatchesRulesPerFunctionAndRetainsSnippet(t *testing.T) {
@@ -261,6 +280,138 @@ func TestCheckReportsCacheStatsForCurrentRun(t *testing.T) {
 	want := evaluation.CacheStats{Misses: 1, Writes: 1}
 	if report.Cache == nil || *report.Cache != want {
 		t.Fatalf("cache stats = %#v, want %#v", report.Cache, want)
+	}
+}
+
+func TestCheckEvaluatesRequestedRegionsDirectly(t *testing.T) {
+	root := t.TempDir()
+	source := "package sample\n\n" +
+		"type Flags struct {\n" +
+		"\t// Controls behavior.\n" +
+		"\tFlag bool\n" +
+		"}\n\n" +
+		"func Read() {\n" +
+		"\tprintln(\"read\")\n" +
+		"}\n"
+	if err := os.WriteFile(
+		filepath.Join(root, "sample.go"),
+		[]byte(source),
+		0o600,
+	); err != nil {
+		t.Fatalf("write source: %v", err)
+	}
+	cfg := config.Config{Rules: []config.Rule{
+		{
+			ID:          "comments",
+			Description: "Comments are useful.",
+			Severity:    config.SeverityWarning,
+			Kinds:       []string{"comment"},
+		},
+		{
+			ID:          "fields",
+			Description: "Fields are clear.",
+			Severity:    config.SeverityWarning,
+			Kinds:       []string{"field"},
+		},
+		{
+			ID:          "statements",
+			Description: "Statements are clear.",
+			Severity:    config.SeverityWarning,
+			Kinds:       []string{"statement"},
+		},
+	}}
+	evaluator := &failingRecordingEvaluator{}
+	report, err := (Runner{
+		Extractor: testGoExtractor(t),
+		Evaluator: evaluator,
+	}).Check(context.Background(), cfg, Options{Root: root, Concurrency: 1})
+	if err != nil {
+		t.Fatalf("Check() error = %v", err)
+	}
+	if report.CodeUnits != 5 {
+		t.Fatalf("code units = %d, want two declarations and three regions", report.CodeUnits)
+	}
+	if report.Evaluations != 3 || len(evaluator.batches) != 3 {
+		t.Fatalf(
+			"evaluations = %d, batches = %d; want 3",
+			report.Evaluations,
+			len(evaluator.batches),
+		)
+	}
+	wantKinds := []parsing.CodeKind{
+		parsing.CodeKindComment,
+		parsing.CodeKindField,
+		parsing.CodeKindStatement,
+	}
+	for index, batch := range evaluator.batches {
+		if batch.CodeUnit.Kind != wantKinds[index] {
+			t.Fatalf(
+				"batch %d kind = %q, want %q",
+				index,
+				batch.CodeUnit.Kind,
+				wantKinds[index],
+			)
+		}
+		if batch.CodeUnit.ParentSource == "" || batch.CodeUnit.RegionKind == "" {
+			t.Fatalf("batch %d lacks region context: %#v", index, batch.CodeUnit)
+		}
+	}
+	if len(report.Findings) != 3 {
+		t.Fatalf("findings = %#v", report.Findings)
+	}
+	for _, finding := range report.Findings {
+		if len(finding.Locations) != 1 ||
+			finding.Locations[0].Category != string(finding.Kind) ||
+			finding.Locations[0].Kind == "" {
+			t.Fatalf("direct finding location = %#v", finding)
+		}
+	}
+}
+
+func TestUnitsForRulesDeduplicatesRegionsUsingClosestParent(t *testing.T) {
+	region := parsing.Region{
+		Category:  "comment",
+		Kind:      "comment",
+		Source:    "// Helpful.",
+		StartByte: 25,
+		EndByte:   36,
+	}
+	units := []parsing.CodeUnit{
+		{
+			Kind:      parsing.CodeKindType,
+			Name:      "Service",
+			Source:    "type parent",
+			StartByte: 0,
+			EndByte:   100,
+			Regions:   []parsing.Region{region},
+		},
+		{
+			Kind:      parsing.CodeKindFunction,
+			Name:      "Read",
+			Source:    "function parent",
+			StartByte: 20,
+			EndByte:   50,
+			Regions:   []parsing.Region{region},
+		},
+	}
+	rules := []config.Rule{{Kinds: []string{"comment"}}}
+
+	expanded := unitsForRules(units, rules)
+	if len(expanded) != 3 {
+		t.Fatalf("unitsForRules() = %#v, want one deduplicated region", expanded)
+	}
+	var comment *parsing.CodeUnit
+	for index := range expanded {
+		if expanded[index].Kind == parsing.CodeKindComment {
+			comment = &expanded[index]
+		}
+	}
+	if comment == nil || comment.ParentSource != "function parent" {
+		t.Fatalf("comment unit = %#v, want closest function parent", comment)
+	}
+
+	if got := unitsForRules(units, []config.Rule{{}}); len(got) != len(units) {
+		t.Fatalf("omitted kinds expanded %d units, want %d", len(got), len(units))
 	}
 }
 

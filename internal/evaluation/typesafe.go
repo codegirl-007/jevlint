@@ -269,7 +269,7 @@ func (client *TypeSafe) requestBody(batch Batch) ([]byte, error) {
 			Type: "choice",
 			Instructions: instructionsFor(
 				rule,
-				batch.CodeUnit.Kind,
+				batch.CodeUnit,
 			),
 			Criteria: map[string]string{
 				"pass": "The code complies with the rule, or an explicit exception applies.",
@@ -451,10 +451,10 @@ func (response attemptResponse) err() error {
 
 func instructionsFor(
 	rule config.Rule,
-	kind parsing.CodeKind,
+	unit parsing.CodeUnit,
 ) string {
 	var builder strings.Builder
-	if kind == parsing.CodeKindRegion {
+	if unit.ParentSource != "" {
 		builder.WriteString(
 			"Determine whether state.source violates this rule. " +
 				"Use state.parentSource only as surrounding context:\n",

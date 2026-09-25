@@ -231,6 +231,7 @@ func (runner Runner) planFile(
 	if err != nil {
 		return nil, 0, false, err
 	}
+	units = unitsForRules(units, applicable)
 	return jobsForUnits(units, applicable), len(units), true, nil
 }
 
@@ -264,6 +265,120 @@ func jobsForUnits(units []parsing.CodeUnit, rules []config.Rule) []evaluationJob
 	return jobs
 }
 
+type regionIdentity struct {
+	category  string
+	kind      string
+	startByte uint
+	endByte   uint
+}
+
+type selectedRegion struct {
+	unit       parsing.CodeUnit
+	parentSpan uint
+}
+
+func unitsForRules(
+	units []parsing.CodeUnit,
+	rules []config.Rule,
+) []parsing.CodeUnit {
+	requested := requestedRegionKinds(rules)
+	if len(requested) == 0 {
+		return units
+	}
+
+	selected := make(map[regionIdentity]selectedRegion)
+	for _, parent := range units {
+		parentSpan := parent.EndByte - parent.StartByte
+		for _, region := range parent.Regions {
+			kind, ok := requested[region.Category]
+			if !ok {
+				continue
+			}
+			key := regionIdentity{
+				category:  region.Category,
+				kind:      region.Kind,
+				startByte: region.StartByte,
+				endByte:   region.EndByte,
+			}
+			existing, exists := selected[key]
+			if exists && existing.parentSpan <= parentSpan {
+				continue
+			}
+			selected[key] = selectedRegion{
+				unit:       regionCodeUnit(parent, region, kind),
+				parentSpan: parentSpan,
+			}
+		}
+	}
+
+	expanded := append([]parsing.CodeUnit(nil), units...)
+	for _, item := range selected {
+		expanded = append(expanded, item.unit)
+	}
+	sort.SliceStable(expanded, func(i, j int) bool {
+		if expanded[i].StartByte == expanded[j].StartByte {
+			return codeKindRank(expanded[i].Kind) < codeKindRank(expanded[j].Kind)
+		}
+		return expanded[i].StartByte < expanded[j].StartByte
+	})
+	return expanded
+}
+
+func requestedRegionKinds(rules []config.Rule) map[string]parsing.CodeKind {
+	requested := make(map[string]parsing.CodeKind)
+	for _, rule := range rules {
+		for _, kind := range rule.Kinds {
+			switch parsing.CodeKind(kind) {
+			case parsing.CodeKindComment:
+				requested["comment"] = parsing.CodeKindComment
+			case parsing.CodeKindField:
+				requested["field"] = parsing.CodeKindField
+			case parsing.CodeKindStatement:
+				requested["statement"] = parsing.CodeKindStatement
+			}
+		}
+	}
+	return requested
+}
+
+func regionCodeUnit(
+	parent parsing.CodeUnit,
+	region parsing.Region,
+	kind parsing.CodeKind,
+) parsing.CodeUnit {
+	return parsing.CodeUnit{
+		Kind:         kind,
+		Name:         parent.Name + ":" + region.Kind,
+		Language:     parent.Language,
+		Path:         parent.Path,
+		Source:       region.Source,
+		ParentSource: parent.Source,
+		RegionKind:   region.Kind,
+		StartLine:    region.StartLine,
+		EndLine:      region.EndLine,
+		StartColumn:  region.StartColumn,
+		EndColumn:    region.EndColumn,
+		StartByte:    region.StartByte,
+		EndByte:      region.EndByte,
+		RelatedTypes: parent.RelatedTypes,
+	}
+}
+
+func codeKindRank(kind parsing.CodeKind) int {
+	switch kind {
+	case parsing.CodeKindType:
+		return 0
+	case parsing.CodeKindFunction:
+		return 1
+	case parsing.CodeKindComment:
+		return 2
+	case parsing.CodeKindField:
+		return 3
+	default:
+		return 4
+	}
+}
+
 func collectOutcomes(
 	report *Report,
 	outcomes []evaluationOutcome,
@@ -284,7 +399,7 @@ func appendFindings(report *Report, pending []pendingFinding) {
 
 func appliesToKind(rule config.Rule, kind parsing.CodeKind) bool {
 	if len(rule.Kinds) == 0 {
-		return true
+		return kind == parsing.CodeKindFunction || kind == parsing.CodeKindType
 	}
 	for _, allowed := range rule.Kinds {
 		if allowed == string(kind) {
@@ -444,12 +559,28 @@ func evaluateJob(
 				StartColumn: job.unit.StartColumn,
 				EndColumn:   job.unit.EndColumn,
 				Snippet:     job.unit.Source,
+				Locations:   directUnitLocations(job.unit),
 			},
 			rule: rule,
 			unit: job.unit,
 		})
 	}
 	return outcome, nil
+}
+
+func directUnitLocations(unit parsing.CodeUnit) []Location {
+	if unit.RegionKind == "" {
+		return nil
+	}
+	return []Location{{
+		Category:    string(unit.Kind),
+		Kind:        unit.RegionKind,
+		Source:      unit.Source,
+		StartLine:   unit.StartLine,
+		EndLine:     unit.EndLine,
+		StartColumn: unit.StartColumn,
+		EndColumn:   unit.EndColumn,
+	}}
 }
 
 func localizeFindings(

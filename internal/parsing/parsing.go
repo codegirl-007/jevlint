@@ -16,6 +16,7 @@ type CodeUnit struct {
 	Path         string            `json:"path"`
 	Source       string            `json:"source"`
 	ParentSource string            `json:"parentSource,omitempty"`
+	RegionKind   string            `json:"regionKind,omitempty"`
 	StartLine    uint              `json:"startLine"`
 	EndLine      uint              `json:"endLine"`
 	StartColumn  uint              `json:"startColumn"`
@@ -29,9 +30,12 @@ type CodeUnit struct {
 type CodeKind string
 
 const (
-	CodeKindFunction CodeKind = "function"
-	CodeKindType     CodeKind = "type"
-	CodeKindRegion   CodeKind = "region"
+	CodeKindFunction  CodeKind = "function"
+	CodeKindType      CodeKind = "type"
+	CodeKindComment   CodeKind = "comment"
+	CodeKindField     CodeKind = "field"
+	CodeKindStatement CodeKind = "statement"
+	CodeKindRegion    CodeKind = "region"
 )
 
 type Region struct {

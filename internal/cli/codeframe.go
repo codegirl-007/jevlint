@@ -44,7 +44,7 @@ func writeCodeFrame(writer io.Writer, style outputStyle, finding runner.Finding)
 			start, length, ok := pointerForLine(
 				rawLines[index],
 				lineNumber,
-				location,
+				displayLocation(finding, location),
 				tabWidth,
 			)
 			if !ok {
@@ -64,6 +64,23 @@ func writeCodeFrame(writer io.Writer, style outputStyle, finding runner.Finding)
 			)
 		}
 	}
+}
+
+func displayLocation(
+	finding runner.Finding,
+	location runner.Location,
+) runner.Location {
+	if location.StartLine != finding.StartLine || finding.StartColumn == 0 {
+		return location
+	}
+	offset := finding.StartColumn
+	if location.StartColumn >= offset {
+		location.StartColumn -= offset
+	}
+	if location.EndLine == finding.StartLine && location.EndColumn >= offset {
+		location.EndColumn -= offset
+	}
+	return location
 }
 
 func highlightedLines(source string, language string, color bool) []string {

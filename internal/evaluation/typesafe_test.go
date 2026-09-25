@@ -132,12 +132,13 @@ func TestTypeSafeEvaluateExplainsRegionContext(t *testing.T) {
 	batch := testBatch()
 	batch.Rules = batch.Rules[:1]
 	batch.CodeUnit = parsing.CodeUnit{
-		Kind:         parsing.CodeKindRegion,
+		Kind:         parsing.CodeKindField,
 		Name:         "FeatureFlags:field_declaration",
 		Language:     "go",
 		Path:         "flags.go",
 		Source:       "Enabled bool",
 		ParentSource: "type FeatureFlags struct {\n\tEnabled bool\n}",
+		RegionKind:   "field_declaration",
 		StartLine:    4,
 		EndLine:      4,
 	}

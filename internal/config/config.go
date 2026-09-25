@@ -301,10 +301,11 @@ func validateRuleLocalization(rule Rule, prefix string) error {
 func validateRuleKinds(rule Rule, prefix string) error {
 	for _, kind := range rule.Kinds {
 		switch kind {
-		case "function", "type":
+		case "comment", "field", "function", "statement", "type":
 		default:
 			return fmt.Errorf(
-				"%s.kinds contains invalid kind %q; want function or type",
+				"%s.kinds contains invalid kind %q; "+
+					"want comment, field, function, statement, or type",
 				prefix,
 				kind,
 			)
