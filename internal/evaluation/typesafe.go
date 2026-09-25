@@ -3,6 +3,7 @@ package evaluation
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,6 +14,8 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"jevlint/internal/config"
@@ -25,6 +28,7 @@ const (
 	defaultTimeout    = 10 * time.Second
 	defaultMaxRetries = 2
 	maxResponseBytes  = 1 << 20
+	cacheKeyVersion   = "typesafe-evaluation-v1"
 )
 
 type TypeSafeOptions struct {
@@ -34,15 +38,24 @@ type TypeSafeOptions struct {
 	HTTPClient *http.Client
 	MaxRetries int
 	Sleep      func(context.Context, time.Duration) error
+	Cache      ResultCache
+	Refresh    bool
 }
 
 type TypeSafe struct {
-	apiKey     string
-	baseURL    string
-	model      string
-	httpClient *http.Client
-	maxRetries int
-	sleep      func(context.Context, time.Duration) error
+	apiKey      string
+	baseURL     string
+	model       string
+	httpClient  *http.Client
+	maxRetries  int
+	sleep       func(context.Context, time.Duration) error
+	cache       ResultCache
+	refresh     bool
+	inflightMu  sync.Mutex
+	inflight    map[string]*evaluationCall
+	cacheHits   atomic.Uint64
+	cacheMisses atomic.Uint64
+	cacheWrites atomic.Uint64
 }
 
 type systemOneRequest struct {
@@ -74,12 +87,21 @@ type attemptResponse struct {
 	requestErr error
 }
 
+type evaluationCall struct {
+	done    chan struct{}
+	results map[string]Result
+	err     error
+}
+
 func NewTypeSafeFromEnv() (*TypeSafe, error) {
-	return NewTypeSafe(TypeSafeOptions{
-		APIKey:  os.Getenv("TYPESAFE_API_KEY"),
-		BaseURL: os.Getenv("TYPESAFE_BASE_URL"),
-		Model:   os.Getenv("TYPESAFE_DEFAULT_MODEL"),
-	})
+	return NewTypeSafeFromEnvWithOptions(TypeSafeOptions{})
+}
+
+func NewTypeSafeFromEnvWithOptions(options TypeSafeOptions) (*TypeSafe, error) {
+	options.APIKey = os.Getenv("TYPESAFE_API_KEY")
+	options.BaseURL = os.Getenv("TYPESAFE_BASE_URL")
+	options.Model = os.Getenv("TYPESAFE_DEFAULT_MODEL")
+	return NewTypeSafe(options)
 }
 
 func NewTypeSafe(options TypeSafeOptions) (*TypeSafe, error) {
@@ -127,10 +149,113 @@ func NewTypeSafe(options TypeSafeOptions) (*TypeSafe, error) {
 		httpClient: httpClient,
 		maxRetries: maxRetries,
 		sleep:      sleep,
+		cache:      options.Cache,
+		refresh:    options.Refresh,
+		inflight:   make(map[string]*evaluationCall),
 	}, nil
 }
 
 func (client *TypeSafe) Evaluate(ctx context.Context, batch Batch) (map[string]Result, error) {
+	body, err := client.requestBody(batch)
+	if err != nil {
+		return nil, err
+	}
+	if client.cache == nil {
+		return client.evaluateBody(ctx, body, batch.Rules)
+	}
+
+	key := client.cacheKey(body)
+	if !client.refresh {
+		if results, ok := client.cachedResults(key, batch.Rules); ok {
+			client.cacheHits.Add(1)
+			return results, nil
+		}
+	}
+	return client.evaluateOnce(ctx, key, func() (map[string]Result, error) {
+		if !client.refresh {
+			if results, ok := client.cachedResults(key, batch.Rules); ok {
+				client.cacheHits.Add(1)
+				return results, nil
+			}
+		}
+		client.cacheMisses.Add(1)
+		results, err := client.evaluateBody(ctx, body, batch.Rules)
+		if err != nil {
+			return nil, err
+		}
+		if client.cache.Put(key, results) {
+			client.cacheWrites.Add(1)
+		}
+		return results, nil
+	})
+}
+
+func (client *TypeSafe) evaluateBody(
+	ctx context.Context,
+	body []byte,
+	rules []config.Rule,
+) (map[string]Result, error) {
+	responseBody, err := client.perform(ctx, body)
+	if err != nil {
+		return nil, err
+	}
+	return decodeResults(responseBody, rules)
+}
+
+func (client *TypeSafe) cachedResults(
+	key string,
+	rules []config.Rule,
+) (map[string]Result, bool) {
+	results, ok := client.cache.Get(key)
+	if !ok || len(results) != len(rules) {
+		return nil, false
+	}
+	for _, rule := range rules {
+		result, exists := results[rule.ID]
+		if !exists || result.Validate() != nil {
+			return nil, false
+		}
+	}
+	return results, true
+}
+
+func (client *TypeSafe) evaluateOnce(
+	ctx context.Context,
+	key string,
+	evaluate func() (map[string]Result, error),
+) (map[string]Result, error) {
+	client.inflightMu.Lock()
+	if call, ok := client.inflight[key]; ok {
+		client.inflightMu.Unlock()
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-call.done:
+			return cloneResults(call.results), call.err
+		}
+	}
+	call := &evaluationCall{done: make(chan struct{})}
+	client.inflight[key] = call
+	client.inflightMu.Unlock()
+
+	call.results, call.err = evaluate()
+
+	client.inflightMu.Lock()
+	delete(client.inflight, key)
+	close(call.done)
+	client.inflightMu.Unlock()
+	return cloneResults(call.results), call.err
+}
+
+func (client *TypeSafe) CacheStats() CacheStats {
+	return CacheStats{
+		Hits:   client.cacheHits.Load(),
+		Misses: client.cacheMisses.Load(),
+		Writes: client.cacheWrites.Load(),
+	}
+}
+
+func (client *TypeSafe) requestBody(batch Batch) ([]byte, error) {
 	if len(batch.Rules) == 0 {
 		return nil, errors.New("at least one rule is required")
 	}
@@ -161,12 +286,13 @@ func (client *TypeSafe) Evaluate(ctx context.Context, batch Batch) (map[string]R
 	if err != nil {
 		return nil, fmt.Errorf("encode TypeSafe request: %w", err)
 	}
+	return body, nil
+}
 
-	responseBody, err := client.perform(ctx, body)
-	if err != nil {
-		return nil, err
-	}
-
+func decodeResults(
+	responseBody []byte,
+	rules []config.Rule,
+) (map[string]Result, error) {
 	var response systemOneResponse
 	if err := json.Unmarshal(responseBody, &response); err != nil {
 		return nil, fmt.Errorf("decode TypeSafe response: %w", err)
@@ -175,8 +301,8 @@ func (client *TypeSafe) Evaluate(ctx context.Context, batch Batch) (map[string]R
 		return nil, errors.New("decode TypeSafe response: answers are missing")
 	}
 
-	results := make(map[string]Result, len(batch.Rules))
-	for _, rule := range batch.Rules {
+	results := make(map[string]Result, len(rules))
+	for _, rule := range rules {
 		answer, ok := response.Answers[rule.ID]
 		if !ok {
 			return nil, fmt.Errorf("decode TypeSafe response: answer for rule %q is missing", rule.ID)
@@ -205,6 +331,22 @@ func (client *TypeSafe) Evaluate(ctx context.Context, batch Batch) (map[string]R
 		results[rule.ID] = result
 	}
 	return results, nil
+}
+
+func (client *TypeSafe) cacheKey(body []byte) string {
+	credential := sha256.Sum256([]byte(client.apiKey))
+	hash := sha256.New()
+	for _, part := range [][]byte{
+		[]byte(cacheKeyVersion),
+		[]byte(client.baseURL),
+		[]byte(client.model),
+		[]byte(fmt.Sprintf("%x", credential)),
+		body,
+	} {
+		hash.Write(part)
+		hash.Write([]byte{0})
+	}
+	return fmt.Sprintf("%x", hash.Sum(nil))
 }
 
 func (client *TypeSafe) perform(ctx context.Context, body []byte) ([]byte, error) {

@@ -7,11 +7,6 @@ import (
 	"strings"
 
 	tree_sitter "github.com/tree-sitter/go-tree-sitter"
-	tree_sitter_go "github.com/tree-sitter/tree-sitter-go/bindings/go"
-	tree_sitter_javascript "github.com/tree-sitter/tree-sitter-javascript/bindings/go"
-	tree_sitter_python "github.com/tree-sitter/tree-sitter-python/bindings/go"
-	tree_sitter_rust "github.com/tree-sitter/tree-sitter-rust/bindings/go"
-	tree_sitter_typescript "github.com/tree-sitter/tree-sitter-typescript/bindings/go"
 )
 
 type CodeUnit struct {
@@ -66,71 +61,11 @@ type languageSpec struct {
 	functionQuery    string
 	typeQuery        string
 	typeContextQuery string
-	regionKinds      map[string]struct{}
+	regionKinds      map[string]string
 }
 
 type Extractor struct {
 	byExtension map[string]languageSpec
-}
-
-func NewExtractor() *Extractor {
-	javascript := languageSpec{
-		name:          "javascript",
-		language:      tree_sitter.NewLanguage(tree_sitter_javascript.Language()),
-		functionQuery: javascriptFunctionQuery,
-		typeQuery:     javascriptTypeQuery,
-		regionKinds:   javascriptRegionKinds,
-	}
-	typescript := languageSpec{
-		name:          "typescript",
-		language:      tree_sitter.NewLanguage(tree_sitter_typescript.LanguageTypescript()),
-		functionQuery: javascriptFunctionQuery,
-		typeQuery:     typescriptTypeQuery,
-		regionKinds:   typescriptRegionKinds,
-	}
-	tsx := languageSpec{
-		name:          "tsx",
-		language:      tree_sitter.NewLanguage(tree_sitter_typescript.LanguageTSX()),
-		functionQuery: javascriptFunctionQuery,
-		typeQuery:     typescriptTypeQuery,
-		regionKinds:   typescriptRegionKinds,
-	}
-	python := languageSpec{
-		name:          "python",
-		language:      tree_sitter.NewLanguage(tree_sitter_python.Language()),
-		functionQuery: pythonFunctionQuery,
-		typeQuery:     pythonTypeQuery,
-		regionKinds:   pythonRegionKinds,
-	}
-	goLanguage := languageSpec{
-		name:          "go",
-		language:      tree_sitter.NewLanguage(tree_sitter_go.Language()),
-		functionQuery: goFunctionQuery,
-		typeQuery:     goTypeQuery,
-		regionKinds:   goRegionKinds,
-	}
-	rust := languageSpec{
-		name:             "rust",
-		language:         tree_sitter.NewLanguage(tree_sitter_rust.Language()),
-		functionQuery:    rustFunctionQuery,
-		typeQuery:        rustTypeQuery,
-		typeContextQuery: rustImplQuery,
-		regionKinds:      rustRegionKinds,
-	}
-
-	return &Extractor{byExtension: map[string]languageSpec{
-		".js":  javascript,
-		".jsx": javascript,
-		".mjs": javascript,
-		".cjs": javascript,
-		".ts":  typescript,
-		".mts": typescript,
-		".cts": typescript,
-		".tsx": tsx,
-		".py":  python,
-		".go":  goLanguage,
-		".rs":  rust,
-	}}
 }
 
 func (extractor *Extractor) Supports(path string) bool {
@@ -376,16 +311,16 @@ func extractMatches(
 func extractRegions(
 	root *tree_sitter.Node,
 	source []byte,
-	kinds map[string]struct{},
+	kinds map[string]string,
 ) []Region {
 	regions := make([]Region, 0)
 	var walk func(*tree_sitter.Node)
 	walk = func(node *tree_sitter.Node) {
-		if _, ok := kinds[node.Kind()]; ok {
+		if category, ok := kinds[node.Kind()]; ok {
 			start := node.StartPosition()
 			end := node.EndPosition()
 			regions = append(regions, Region{
-				Category:    regionCategory(node.Kind()),
+				Category:    category,
 				Kind:        node.Kind(),
 				Source:      node.Utf8Text(source),
 				StartLine:   start.Row + 1,
@@ -411,20 +346,6 @@ func extractRegions(
 		return regions[i].StartByte < regions[j].StartByte
 	})
 	return regions
-}
-
-func regionCategory(kind string) string {
-	switch kind {
-	case "comment", "line_comment", "block_comment":
-		return "comment"
-	case "field_declaration",
-		"field_definition",
-		"property_signature",
-		"public_field_definition":
-		return "field"
-	default:
-		return "statement"
-	}
 }
 
 func documentationAnchor(node *tree_sitter.Node) *tree_sitter.Node {
@@ -594,68 +515,3 @@ const rustImplQuery = `
 (impl_item
   type: (type_identifier) @name) @type
 `
-
-var javascriptRegionKinds = kindSet(
-	"comment",
-	"expression_statement",
-	"field_definition",
-	"lexical_declaration",
-	"public_field_definition",
-	"return_statement",
-	"throw_statement",
-	"variable_declaration",
-)
-
-var typescriptRegionKinds = kindSet(
-	"comment",
-	"expression_statement",
-	"field_definition",
-	"lexical_declaration",
-	"property_signature",
-	"public_field_definition",
-	"return_statement",
-	"throw_statement",
-	"variable_declaration",
-)
-
-var pythonRegionKinds = kindSet(
-	"assignment",
-	"assert_statement",
-	"augmented_assignment",
-	"comment",
-	"expression_statement",
-	"pass_statement",
-	"raise_statement",
-	"return_statement",
-)
-
-var goRegionKinds = kindSet(
-	"assignment_statement",
-	"comment",
-	"defer_statement",
-	"expression_statement",
-	"field_declaration",
-	"go_statement",
-	"inc_statement",
-	"return_statement",
-	"send_statement",
-	"short_var_declaration",
-	"var_declaration",
-)
-
-var rustRegionKinds = kindSet(
-	"block_comment",
-	"expression_statement",
-	"field_declaration",
-	"let_declaration",
-	"line_comment",
-	"return_expression",
-)
-
-func kindSet(kinds ...string) map[string]struct{} {
-	result := make(map[string]struct{}, len(kinds))
-	for _, kind := range kinds {
-		result[kind] = struct{}{}
-	}
-	return result
-}

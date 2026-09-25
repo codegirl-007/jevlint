@@ -27,10 +27,11 @@ type Options struct {
 }
 
 type Report struct {
-	ScannedFiles int       `json:"scannedFiles"`
-	CodeUnits    int       `json:"codeUnits"`
-	Evaluations  int       `json:"evaluations"`
-	Findings     []Finding `json:"findings"`
+	ScannedFiles int                    `json:"scannedFiles"`
+	CodeUnits    int                    `json:"codeUnits"`
+	Evaluations  int                    `json:"evaluations"`
+	Cache        *evaluation.CacheStats `json:"cache,omitempty"`
+	Findings     []Finding              `json:"findings"`
 }
 
 type Finding struct {
@@ -95,6 +96,7 @@ type checkSetup struct {
 }
 
 func (runner Runner) Check(ctx context.Context, cfg config.Config, options Options) (Report, error) {
+	cacheBefore, hasCacheStats := evaluatorCacheStats(runner.Evaluator)
 	setup, err := runner.prepareCheck(options)
 	if err != nil {
 		return Report{}, err
@@ -123,7 +125,33 @@ func (runner Runner) Check(ctx context.Context, cfg config.Config, options Optio
 	}
 	report.Evaluations += localizationEvaluations
 	appendFindings(&report, pending)
+	if hasCacheStats {
+		cacheAfter, _ := evaluatorCacheStats(runner.Evaluator)
+		cacheDelta := subtractCacheStats(cacheAfter, cacheBefore)
+		if cacheDelta.Hits+cacheDelta.Misses+cacheDelta.Writes > 0 {
+			report.Cache = &cacheDelta
+		}
+	}
 	return report, nil
+}
+
+func evaluatorCacheStats(evaluator evaluation.Evaluator) (evaluation.CacheStats, bool) {
+	provider, ok := evaluator.(evaluation.CacheStatsProvider)
+	if !ok {
+		return evaluation.CacheStats{}, false
+	}
+	return provider.CacheStats(), true
+}
+
+func subtractCacheStats(
+	after evaluation.CacheStats,
+	before evaluation.CacheStats,
+) evaluation.CacheStats {
+	return evaluation.CacheStats{
+		Hits:   after.Hits - before.Hits,
+		Misses: after.Misses - before.Misses,
+		Writes: after.Writes - before.Writes,
+	}
 }
 
 func (runner Runner) prepareCheck(options Options) (checkSetup, error) {

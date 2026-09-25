@@ -29,6 +29,16 @@ type Evaluator interface {
 	Evaluate(context.Context, Batch) (map[string]Result, error)
 }
 
+type CacheStats struct {
+	Hits   uint64 `json:"hits"`
+	Misses uint64 `json:"misses"`
+	Writes uint64 `json:"writes"`
+}
+
+type CacheStatsProvider interface {
+	CacheStats() CacheStats
+}
+
 func (result Result) Validate() error {
 	switch result.Status {
 	case StatusPass, StatusFail:

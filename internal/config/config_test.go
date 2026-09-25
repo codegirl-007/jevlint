@@ -8,7 +8,7 @@ import (
 func TestDecodeValidConfig(t *testing.T) {
 	t.Parallel()
 
-	cfg, err := Decode(strings.NewReader(`{
+	cfg, err := Decode(strings.NewReader(withGoLanguage(`{
 		"rules": [{
 			"id": "database-joins",
 			"description": "Join related database records in the database.",
@@ -17,7 +17,7 @@ func TestDecodeValidConfig(t *testing.T) {
 			"kinds": ["function"],
 			"localize": ["statement"]
 		}]
-	}`))
+	}`)))
 	if err != nil {
 		t.Fatalf("Decode() error = %v", err)
 	}
@@ -69,7 +69,7 @@ func TestDecodeRejectsInvalidConfig(t *testing.T) {
 		name, input := name, input
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
-			if _, err := Decode(strings.NewReader(input)); err == nil {
+			if _, err := Decode(strings.NewReader(withGoLanguage(input))); err == nil {
 				t.Fatal("Decode() error = nil, want an error")
 			}
 		})
@@ -162,10 +162,128 @@ func TestDecodeValidationErrors(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 
-			_, err := Decode(strings.NewReader(test.input))
+			_, err := Decode(strings.NewReader(withGoLanguage(test.input)))
 			if err == nil || err.Error() != test.want {
 				t.Fatalf("Decode() error = %v, want %q", err, test.want)
 			}
 		})
 	}
+}
+
+func TestDecodeLanguageOverrides(t *testing.T) {
+	t.Parallel()
+
+	cfg, err := Decode(strings.NewReader(`{
+		"languages": {
+			"java": {},
+			"cpp": {
+				"extensions": [".cpp", ".hpp"],
+				"functionQueries": ["(function_definition) @function"],
+				"typeQueries": ["(class_specifier) @type"],
+				"regions": {
+					"comment": ["comment"],
+					"field": ["field_declaration"],
+					"statement": ["return_statement"]
+				}
+			}
+		},
+		"rules": [{
+			"id": "one",
+			"description": "A rule.",
+			"severity": "info"
+		}]
+	}`))
+	if err != nil {
+		t.Fatalf("Decode() error = %v", err)
+	}
+	if len(cfg.Languages) != 2 ||
+		len(cfg.Languages["cpp"].Extensions) != 2 ||
+		cfg.Languages["java"].Extensions != nil {
+		t.Fatalf("Decode() languages = %#v", cfg.Languages)
+	}
+}
+
+func TestValidateRejectsInvalidLanguages(t *testing.T) {
+	t.Parallel()
+
+	validRule := []Rule{{
+		ID:          "one",
+		Description: "A rule.",
+		Severity:    SeverityInfo,
+	}}
+	tests := map[string]struct {
+		languages map[string]Language
+		want      string
+	}{
+		"missing languages": {
+			want: "config must enable at least one language",
+		},
+		"unknown preset": {
+			languages: map[string]Language{"brainfuck": {}},
+			want:      `languages contains unknown preset "brainfuck"`,
+		},
+		"empty extensions": {
+			languages: map[string]Language{"go": {Extensions: []string{}}},
+			want:      "languages.go.extensions cannot be empty",
+		},
+		"malformed extension": {
+			languages: map[string]Language{"go": {Extensions: []string{"GO"}}},
+			want:      `languages.go.extensions contains invalid extension "GO"`,
+		},
+		"duplicate extension": {
+			languages: map[string]Language{
+				"go":   {Extensions: []string{".source"}},
+				"rust": {Extensions: []string{".source"}},
+			},
+			want: `language extension ".source" is assigned to both "go" and "rust"`,
+		},
+		"empty function queries": {
+			languages: map[string]Language{
+				"go": {FunctionQueries: []string{}},
+			},
+			want: "languages.go.functionQueries cannot be empty",
+		},
+		"blank type query": {
+			languages: map[string]Language{
+				"go": {TypeQueries: []string{" "}},
+			},
+			want: "languages.go.typeQueries contains an empty query",
+		},
+		"invalid region category": {
+			languages: map[string]Language{
+				"go": {Regions: map[string][]string{"banana": {"node"}}},
+			},
+			want: `languages.go.regions contains invalid category "banana"`,
+		},
+		"empty region kinds": {
+			languages: map[string]Language{
+				"go": {Regions: map[string][]string{"field": {}}},
+			},
+			want: "languages.go.regions.field cannot be empty",
+		},
+	}
+
+	for name, test := range tests {
+		test := test
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			err := (Config{
+				Languages: test.languages,
+				Rules:     validRule,
+			}).Validate()
+			if err == nil || err.Error() != test.want {
+				t.Fatalf("Validate() error = %v, want %q", err, test.want)
+			}
+		})
+	}
+}
+
+func withGoLanguage(input string) string {
+	return strings.Replace(
+		input,
+		"{",
+		`{"languages":{"go":{}},`,
+		1,
+	)
 }

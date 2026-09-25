@@ -21,10 +21,13 @@ const usage = `Usage:
   jevlint check [flags] [paths...]
 
 Flags:
+  --clear-cache         clear this project's cached evaluations before checking
   --color mode          color output: auto, always, or never (default "auto")
   --config path         rule configuration (default "jevlint.json")
   --concurrency number  maximum concurrent Jev requests (default 4)
   --format text|json    output format (default "text")
+  --no-cache            bypass evaluation cache reads and writes
+  --refresh-cache       reevaluate and replace current cached results
 `
 
 func Run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
@@ -39,10 +42,13 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 
 	flags := flag.NewFlagSet("check", flag.ContinueOnError)
 	flags.SetOutput(stderr)
+	clearCache := flags.Bool("clear-cache", false, "clear cached evaluations")
 	color := flags.String("color", "auto", "color output")
 	configPath := flags.String("config", "jevlint.json", "rule configuration")
 	concurrency := flags.Int("concurrency", 4, "maximum concurrent Jev requests")
 	format := flags.String("format", "text", "output format")
+	noCache := flags.Bool("no-cache", false, "bypass evaluation cache")
+	refreshCache := flags.Bool("refresh-cache", false, "refresh cached evaluations")
 	flags.Usage = func() {
 		fmt.Fprint(stderr, usage)
 	}
@@ -64,6 +70,10 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "jevlint: --concurrency must be at least 1")
 		return 2
 	}
+	if *noCache && *refreshCache {
+		fmt.Fprintln(stderr, "jevlint: --no-cache and --refresh-cache cannot be combined")
+		return 2
+	}
 
 	absoluteConfig, err := filepath.Abs(*configPath)
 	if err != nil {
@@ -76,18 +86,52 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 
-	evaluator, err := evaluation.NewTypeSafeFromEnv()
+	extractor, err := parsing.NewExtractor(cfg.Languages)
+	if err != nil {
+		fmt.Fprintf(stderr, "jevlint: configure languages: %v\n", err)
+		return 2
+	}
+
+	projectRoot := filepath.Dir(absoluteConfig)
+	var resultCache evaluation.ResultCache
+	if !*noCache || *clearCache {
+		cache, cacheErr := evaluation.NewFileCache(projectRoot)
+		if cacheErr != nil {
+			if *clearCache {
+				fmt.Fprintf(stderr, "jevlint: %v\n", cacheErr)
+				return 2
+			}
+			fmt.Fprintf(stderr, "jevlint: cache disabled: %v\n", cacheErr)
+		} else {
+			if *clearCache {
+				if err := cache.Clear(); err != nil {
+					fmt.Fprintf(stderr, "jevlint: %v\n", err)
+					return 2
+				}
+			}
+			if !*noCache {
+				resultCache = cache
+			}
+		}
+	}
+
+	evaluator, err := evaluation.NewTypeSafeFromEnvWithOptions(
+		evaluation.TypeSafeOptions{
+			Cache:   resultCache,
+			Refresh: *refreshCache,
+		},
+	)
 	if err != nil {
 		fmt.Fprintf(stderr, "jevlint: %v\n", err)
 		return 2
 	}
 
 	checker := runner.Runner{
-		Extractor: parsing.NewExtractor(),
+		Extractor: extractor,
 		Evaluator: evaluator,
 	}
 	report, err := checker.Check(ctx, cfg, runner.Options{
-		Root:        filepath.Dir(absoluteConfig),
+		Root:        projectRoot,
 		Paths:       flags.Args(),
 		Concurrency: *concurrency,
 	})
@@ -201,6 +245,15 @@ func writeReportTotals(writer io.Writer, report runner.Report) {
 		report.CodeUnits,
 		report.Evaluations,
 	)
+	if report.Cache != nil {
+		fmt.Fprintf(
+			writer,
+			"  cache · %d hits · %d misses · %d writes\n",
+			report.Cache.Hits,
+			report.Cache.Misses,
+			report.Cache.Writes,
+		)
+	}
 }
 
 type outputStyle struct {

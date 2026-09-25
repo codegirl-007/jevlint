@@ -2,17 +2,35 @@ package evaluation
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"jevlint/internal/config"
 	"jevlint/internal/parsing"
 )
+
+type unavailableCache struct{}
+
+func (unavailableCache) Get(string) (map[string]Result, bool) {
+	return nil, false
+}
+
+func (unavailableCache) Put(string, map[string]Result) bool {
+	return false
+}
+
+func (unavailableCache) Clear() error {
+	return nil
+}
 
 func TestTypeSafeEvaluateBatchesRules(t *testing.T) {
 	t.Parallel()
@@ -129,6 +147,394 @@ func TestTypeSafeEvaluateExplainsRegionContext(t *testing.T) {
 	}
 	if results["database-joins"].Status != StatusFail {
 		t.Fatalf("result = %#v", results["database-joins"])
+	}
+}
+
+func TestTypeSafeCacheKeyTracksExactEvaluationInput(t *testing.T) {
+	t.Parallel()
+
+	client, err := NewTypeSafe(TypeSafeOptions{
+		APIKey:  "sk-one",
+		BaseURL: "https://one.example",
+		Model:   "jev-one",
+	})
+	if err != nil {
+		t.Fatalf("NewTypeSafe() error = %v", err)
+	}
+	body, err := client.requestBody(testBatch())
+	if err != nil {
+		t.Fatalf("requestBody() error = %v", err)
+	}
+	key := client.cacheKey(body)
+	if len(key) != sha256.Size*2 {
+		t.Fatalf("cacheKey() length = %d, want %d", len(key), sha256.Size*2)
+	}
+
+	sameBody, err := client.requestBody(testBatch())
+	if err != nil {
+		t.Fatalf("requestBody() error = %v", err)
+	}
+	if sameKey := client.cacheKey(sameBody); sameKey != key {
+		t.Fatalf("identical cache key = %q, want %q", sameKey, key)
+	}
+
+	severityOnly := testBatch()
+	severityOnly.Rules[0].Severity = config.SeverityError
+	severityBody, err := client.requestBody(severityOnly)
+	if err != nil {
+		t.Fatalf("requestBody() error = %v", err)
+	}
+	if severityKey := client.cacheKey(severityBody); severityKey != key {
+		t.Fatalf("severity cache key = %q, want %q", severityKey, key)
+	}
+
+	changed := testBatch()
+	changed.CodeUnit.Source += "\n"
+	changedBody, err := client.requestBody(changed)
+	if err != nil {
+		t.Fatalf("requestBody() error = %v", err)
+	}
+	if changedKey := client.cacheKey(changedBody); changedKey == key {
+		t.Fatal("source change did not change cache key")
+	}
+
+	mutations := map[string]func(*Batch){
+		"path": func(batch *Batch) {
+			batch.CodeUnit.Path = "other.go"
+		},
+		"location": func(batch *Batch) {
+			batch.CodeUnit.StartLine++
+		},
+		"related type": func(batch *Batch) {
+			batch.CodeUnit.RelatedTypes[0].Source = "type User struct{ ID int }"
+		},
+		"rule description": func(batch *Batch) {
+			batch.Rules[0].Description = "A different rule."
+		},
+		"rule exception": func(batch *Batch) {
+			batch.Rules[0].Exceptions = []string{"A different exception."}
+		},
+		"localization state": func(batch *Batch) {
+			batch.CodeUnit.Kind = parsing.CodeKindRegion
+			batch.CodeUnit.ParentSource = "different parent"
+		},
+		"batch membership": func(batch *Batch) {
+			batch.Rules = batch.Rules[:1]
+		},
+	}
+	for name, mutate := range mutations {
+		name, mutate := name, mutate
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			changed := testBatch()
+			mutate(&changed)
+			changedBody, err := client.requestBody(changed)
+			if err != nil {
+				t.Fatalf("requestBody() error = %v", err)
+			}
+			if changedKey := client.cacheKey(changedBody); changedKey == key {
+				t.Fatalf("%s change did not change cache key", name)
+			}
+		})
+	}
+
+	for name, options := range map[string]TypeSafeOptions{
+		"endpoint": {
+			APIKey:  "sk-one",
+			BaseURL: "https://two.example",
+			Model:   "jev-one",
+		},
+		"model": {
+			APIKey:  "sk-one",
+			BaseURL: "https://one.example",
+			Model:   "jev-two",
+		},
+		"credential": {
+			APIKey:  "sk-two",
+			BaseURL: "https://one.example",
+			Model:   "jev-one",
+		},
+	} {
+		name, options := name, options
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			other, err := NewTypeSafe(options)
+			if err != nil {
+				t.Fatalf("NewTypeSafe() error = %v", err)
+			}
+			if otherKey := other.cacheKey(body); otherKey == key {
+				t.Fatalf("%s change did not change cache key", name)
+			}
+		})
+	}
+}
+
+func TestTypeSafeEvaluateCachesValidatedResults(t *testing.T) {
+	t.Parallel()
+
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		fmt.Fprint(writer, `{
+			"answers": {
+				"database-joins": {"type": "choice", "choice": "fail", "confidence": 0.9},
+				"semicolons": {"type": "choice", "choice": "pass", "confidence": 0.8}
+			}
+		}`)
+	}))
+	defer server.Close()
+
+	cache, err := newFileCacheAt(filepath.Join(t.TempDir(), "cache"))
+	if err != nil {
+		t.Fatalf("newFileCacheAt() error = %v", err)
+	}
+	client := newCachedTestClient(t, server, cache, false)
+	for range 2 {
+		results, err := client.Evaluate(context.Background(), testBatch())
+		if err != nil {
+			t.Fatalf("Evaluate() error = %v", err)
+		}
+		if results["database-joins"].Status != StatusFail {
+			t.Fatalf("Evaluate() results = %#v", results)
+		}
+	}
+	if got := requests.Load(); got != 1 {
+		t.Fatalf("HTTP requests = %d, want 1", got)
+	}
+	if stats := client.CacheStats(); stats != (CacheStats{
+		Hits:   1,
+		Misses: 1,
+		Writes: 1,
+	}) {
+		t.Fatalf("CacheStats() = %#v", stats)
+	}
+}
+
+func TestTypeSafeEvaluateBypassesUnavailableOrDisabledCache(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]ResultCache{
+		"disabled":    nil,
+		"unavailable": unavailableCache{},
+	}
+	for name, cache := range tests {
+		name, cache := name, cache
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			var requests atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(
+				func(writer http.ResponseWriter, _ *http.Request) {
+					requests.Add(1)
+					fmt.Fprint(writer, `{
+						"answers": {
+							"database-joins": {
+								"type": "choice",
+								"choice": "pass",
+								"confidence": 1
+							},
+							"semicolons": {
+								"type": "choice",
+								"choice": "pass",
+								"confidence": 1
+							}
+						}
+					}`)
+				},
+			))
+			defer server.Close()
+
+			client := newCachedTestClient(t, server, cache, false)
+			for range 2 {
+				if _, err := client.Evaluate(context.Background(), testBatch()); err != nil {
+					t.Fatalf("Evaluate() error = %v", err)
+				}
+			}
+			if got := requests.Load(); got != 2 {
+				t.Fatalf("HTTP requests = %d, want 2", got)
+			}
+			if cache == nil && client.CacheStats() != (CacheStats{}) {
+				t.Fatalf("CacheStats() = %#v", client.CacheStats())
+			}
+		})
+	}
+}
+
+func TestTypeSafeEvaluateDeduplicatesConcurrentMisses(t *testing.T) {
+	t.Parallel()
+
+	var requests atomic.Int32
+	started := make(chan struct{})
+	release := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		if requests.Add(1) == 1 {
+			close(started)
+		}
+		<-release
+		fmt.Fprint(writer, `{
+			"answers": {
+				"database-joins": {"type": "choice", "choice": "pass", "confidence": 1},
+				"semicolons": {"type": "choice", "choice": "pass", "confidence": 1}
+			}
+		}`)
+	}))
+	defer server.Close()
+
+	cache, err := newFileCacheAt(filepath.Join(t.TempDir(), "cache"))
+	if err != nil {
+		t.Fatalf("newFileCacheAt() error = %v", err)
+	}
+	client := newCachedTestClient(t, server, cache, false)
+
+	const callers = 8
+	errors := make(chan error, callers)
+	var workers sync.WaitGroup
+	workers.Add(callers)
+	for range callers {
+		go func() {
+			defer workers.Done()
+			_, err := client.Evaluate(context.Background(), testBatch())
+			errors <- err
+		}()
+	}
+	<-started
+	close(release)
+	workers.Wait()
+	close(errors)
+	for err := range errors {
+		if err != nil {
+			t.Fatalf("Evaluate() error = %v", err)
+		}
+	}
+	if got := requests.Load(); got != 1 {
+		t.Fatalf("HTTP requests = %d, want 1", got)
+	}
+}
+
+func TestTypeSafeEvaluateRefreshesCachedResult(t *testing.T) {
+	t.Parallel()
+
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		status := "pass"
+		if requests.Add(1) == 2 {
+			status = "fail"
+		}
+		fmt.Fprintf(writer, `{
+			"answers": {
+				"database-joins": {"type": "choice", "choice": %q, "confidence": 1},
+				"semicolons": {"type": "choice", "choice": "pass", "confidence": 1}
+			}
+		}`, status)
+	}))
+	defer server.Close()
+
+	cache, err := newFileCacheAt(filepath.Join(t.TempDir(), "cache"))
+	if err != nil {
+		t.Fatalf("newFileCacheAt() error = %v", err)
+	}
+	initial := newCachedTestClient(t, server, cache, false)
+	if _, err := initial.Evaluate(context.Background(), testBatch()); err != nil {
+		t.Fatalf("initial Evaluate() error = %v", err)
+	}
+
+	refresh := newCachedTestClient(t, server, cache, true)
+	results, err := refresh.Evaluate(context.Background(), testBatch())
+	if err != nil {
+		t.Fatalf("refresh Evaluate() error = %v", err)
+	}
+	if results["database-joins"].Status != StatusFail {
+		t.Fatalf("refresh results = %#v", results)
+	}
+
+	cached := newCachedTestClient(t, server, cache, false)
+	results, err = cached.Evaluate(context.Background(), testBatch())
+	if err != nil {
+		t.Fatalf("cached Evaluate() error = %v", err)
+	}
+	if results["database-joins"].Status != StatusFail {
+		t.Fatalf("cached results = %#v", results)
+	}
+	if got := requests.Load(); got != 2 {
+		t.Fatalf("HTTP requests = %d, want 2", got)
+	}
+}
+
+func TestTypeSafeEvaluateDoesNotCacheMalformedResponse(t *testing.T) {
+	t.Parallel()
+
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		if requests.Add(1) == 1 {
+			fmt.Fprint(writer, `{"answers": {}}`)
+			return
+		}
+		fmt.Fprint(writer, `{
+			"answers": {
+				"database-joins": {"type": "choice", "choice": "pass", "confidence": 1},
+				"semicolons": {"type": "choice", "choice": "pass", "confidence": 1}
+			}
+		}`)
+	}))
+	defer server.Close()
+
+	cache, err := newFileCacheAt(filepath.Join(t.TempDir(), "cache"))
+	if err != nil {
+		t.Fatalf("newFileCacheAt() error = %v", err)
+	}
+	client := newCachedTestClient(t, server, cache, false)
+	if _, err := client.Evaluate(context.Background(), testBatch()); err == nil {
+		t.Fatal("first Evaluate() error = nil")
+	}
+	if _, err := client.Evaluate(context.Background(), testBatch()); err != nil {
+		t.Fatalf("second Evaluate() error = %v", err)
+	}
+	if got := requests.Load(); got != 2 {
+		t.Fatalf("HTTP requests = %d, want 2", got)
+	}
+}
+
+func TestTypeSafeEvaluateReplacesIncompleteCachedBatch(t *testing.T) {
+	t.Parallel()
+
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		fmt.Fprint(writer, `{
+			"answers": {
+				"database-joins": {"type": "choice", "choice": "pass", "confidence": 1},
+				"semicolons": {"type": "choice", "choice": "pass", "confidence": 1}
+			}
+		}`)
+	}))
+	defer server.Close()
+
+	cache, err := newFileCacheAt(filepath.Join(t.TempDir(), "cache"))
+	if err != nil {
+		t.Fatalf("newFileCacheAt() error = %v", err)
+	}
+	client := newCachedTestClient(t, server, cache, false)
+	body, err := client.requestBody(testBatch())
+	if err != nil {
+		t.Fatalf("requestBody() error = %v", err)
+	}
+	if !cache.Put(client.cacheKey(body), map[string]Result{
+		"database-joins": {Status: StatusFail, Confidence: 1},
+	}) {
+		t.Fatal("Put() = false")
+	}
+
+	results, err := client.Evaluate(context.Background(), testBatch())
+	if err != nil {
+		t.Fatalf("Evaluate() error = %v", err)
+	}
+	if results["database-joins"].Status != StatusPass || len(results) != 2 {
+		t.Fatalf("Evaluate() results = %#v", results)
+	}
+	if got := requests.Load(); got != 1 {
+		t.Fatalf("HTTP requests = %d, want 1", got)
 	}
 }
 
@@ -250,6 +656,28 @@ func newTestClient(
 		Model:      "jev-test",
 		HTTPClient: server.Client(),
 		Sleep:      sleep,
+	})
+	if err != nil {
+		t.Fatalf("NewTypeSafe() error = %v", err)
+	}
+	return client
+}
+
+func newCachedTestClient(
+	t *testing.T,
+	server *httptest.Server,
+	cache ResultCache,
+	refresh bool,
+) *TypeSafe {
+	t.Helper()
+
+	client, err := NewTypeSafe(TypeSafeOptions{
+		APIKey:     "sk-test",
+		BaseURL:    server.URL,
+		Model:      "jev-test",
+		HTTPClient: server.Client(),
+		Cache:      cache,
+		Refresh:    refresh,
 	})
 	if err != nil {
 		t.Fatalf("NewTypeSafe() error = %v", err)

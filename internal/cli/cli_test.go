@@ -220,12 +220,50 @@ func TestWriteSummaryNoFindings(t *testing.T) {
 	}
 }
 
+func TestWriteReportTotalsIncludesCacheStats(t *testing.T) {
+	t.Parallel()
+
+	var output bytes.Buffer
+	writeReportTotals(&output, runner.Report{
+		ScannedFiles: 2,
+		CodeUnits:    4,
+		Evaluations:  6,
+		Cache: &evaluation.CacheStats{
+			Hits:   3,
+			Misses: 2,
+			Writes: 1,
+		},
+	})
+	want := "  2 files · 4 code units · 6 evaluations\n" +
+		"  cache · 3 hits · 2 misses · 1 writes\n"
+	if output.String() != want {
+		t.Fatalf("output = %q, want %q", output.String(), want)
+	}
+}
+
 func TestHighlightedLinesEmitsSyntaxColors(t *testing.T) {
 	t.Parallel()
 
-	lines := highlightedLines("func main() {}", "go", true)
-	if !strings.Contains(strings.Join(lines, "\n"), "\x1b[") {
-		t.Fatalf("highlighted lines contain no ANSI colors: %#v", lines)
+	tests := map[string]string{
+		"c":      "int main(void) { return 0; }",
+		"cpp":    "class Example {};",
+		"csharp": "class Example {}",
+		"go":     "func main() {}",
+		"java":   "class Example {}",
+		"kotlin": "class Example",
+		"php":    "<?php function main() {}",
+		"ruby":   "def main; end",
+	}
+	for language, source := range tests {
+		language, source := language, source
+		t.Run(language, func(t *testing.T) {
+			t.Parallel()
+
+			lines := highlightedLines(source, language, true)
+			if !strings.Contains(strings.Join(lines, "\n"), "\x1b[") {
+				t.Fatalf("highlighted lines contain no ANSI colors: %#v", lines)
+			}
+		})
 	}
 }
 
@@ -248,6 +286,71 @@ func TestRunRequiresAPIKey(t *testing.T) {
 	}
 }
 
+func TestRunRejectsInvalidLanguageConfigurationBeforeAPIKey(t *testing.T) {
+	tests := []struct {
+		name   string
+		config string
+		want   string
+	}{
+		{
+			name: "missing languages",
+			config: `{
+				"rules": [{
+					"id": "one",
+					"description": "A rule.",
+					"severity": "info"
+				}]
+			}`,
+			want: "config must enable at least one language",
+		},
+		{
+			name: "query missing name capture",
+			config: `{
+				"languages": {
+					"go": {
+						"functionQueries": ["(function_declaration) @function"]
+					}
+				},
+				"rules": [{
+					"id": "one",
+					"description": "A rule.",
+					"severity": "info"
+				}]
+			}`,
+			want: "go function query must capture @name",
+		},
+	}
+
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			root := t.TempDir()
+			configPath := filepath.Join(root, "jevlint.json")
+			if err := os.WriteFile(configPath, []byte(test.config), 0o600); err != nil {
+				t.Fatalf("write config: %v", err)
+			}
+			t.Setenv("TYPESAFE_API_KEY", "")
+
+			var stdout, stderr bytes.Buffer
+			exitCode := Run(
+				context.Background(),
+				[]string{"check", "--config", configPath, "."},
+				&stdout,
+				&stderr,
+			)
+			if exitCode != 2 {
+				t.Fatalf("Run() exit code = %d, want 2", exitCode)
+			}
+			if !strings.Contains(stderr.String(), test.want) {
+				t.Fatalf("stderr = %q, want %q", stderr.String(), test.want)
+			}
+			if strings.Contains(stderr.String(), "TYPESAFE_API_KEY") {
+				t.Fatalf("stderr reached API validation: %q", stderr.String())
+			}
+		})
+	}
+}
+
 func TestRunRejectsInvalidConcurrency(t *testing.T) {
 	t.Parallel()
 
@@ -262,6 +365,66 @@ func TestRunRejectsInvalidConcurrency(t *testing.T) {
 		t.Fatalf("Run() exit code = %d, want 2", exitCode)
 	}
 	if !strings.Contains(stderr.String(), "--concurrency must be at least 1") {
+		t.Fatalf("stderr = %q", stderr.String())
+	}
+}
+
+func TestRunRejectsConflictingCacheFlags(t *testing.T) {
+	t.Parallel()
+
+	var stdout, stderr bytes.Buffer
+	exitCode := Run(
+		context.Background(),
+		[]string{"check", "--no-cache", "--refresh-cache"},
+		&stdout,
+		&stderr,
+	)
+	if exitCode != 2 {
+		t.Fatalf("Run() exit code = %d, want 2", exitCode)
+	}
+	if !strings.Contains(
+		stderr.String(),
+		"--no-cache and --refresh-cache cannot be combined",
+	) {
+		t.Fatalf("stderr = %q", stderr.String())
+	}
+}
+
+func TestRunClearsProjectCacheBeforeAPIValidation(t *testing.T) {
+	root := writeProject(t, "package sample\n")
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	t.Setenv("TYPESAFE_API_KEY", "")
+
+	cache, err := evaluation.NewFileCache(root)
+	if err != nil {
+		t.Fatalf("NewFileCache() error = %v", err)
+	}
+	if !cache.Put("entry", map[string]evaluation.Result{
+		"rule": {Status: evaluation.StatusPass, Confidence: 1},
+	}) {
+		t.Fatal("Put() = false")
+	}
+
+	var stdout, stderr bytes.Buffer
+	exitCode := Run(
+		context.Background(),
+		[]string{
+			"check",
+			"--config", filepath.Join(root, "jevlint.json"),
+			"--clear-cache",
+			"--no-cache",
+			".",
+		},
+		&stdout,
+		&stderr,
+	)
+	if exitCode != 2 {
+		t.Fatalf("Run() exit code = %d, want 2", exitCode)
+	}
+	if _, ok := cache.Get("entry"); ok {
+		t.Fatal("cache entry remains after --clear-cache")
+	}
+	if !strings.Contains(stderr.String(), "TYPESAFE_API_KEY") {
 		t.Fatalf("stderr = %q", stderr.String())
 	}
 }
@@ -289,6 +452,7 @@ func writeProject(t *testing.T, source string) string {
 
 	root := t.TempDir()
 	config := `{
+		"languages": {"go": {}},
 		"rules": [{
 			"id": "database-joins",
 			"description": "Join related records in the database.",

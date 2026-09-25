@@ -1,9 +1,12 @@
 package parsing
 
 import (
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
+
+	"jevlint/internal/config"
 )
 
 func TestExtractCodeUnits(t *testing.T) {
@@ -77,6 +80,107 @@ func TestExtractCodeUnits(t *testing.T) {
 			wantContextNames:  []string{"Example"},
 			wantContextSource: "impl Example",
 		},
+		{
+			name: "java",
+			path: "Sample.java",
+			code: "class Example {\n" +
+				"  Example() {}\n" +
+				"  int beta() { return 2; }\n" +
+				"}\n",
+			want: []string{
+				"type:Example",
+				"function:Example",
+				"function:beta",
+			},
+			contextUnit:       "beta",
+			wantContextNames:  []string{"Example"},
+			wantContextSource: "class Example",
+		},
+		{
+			name: "csharp",
+			path: "Sample.cs",
+			code: "class Example {\n" +
+				"  public Example() {}\n" +
+				"  public int Beta() { return 2; }\n" +
+				"}\n",
+			want: []string{
+				"type:Example",
+				"function:Example",
+				"function:Beta",
+			},
+			contextUnit:       "Beta",
+			wantContextNames:  []string{"Example"},
+			wantContextSource: "class Example",
+		},
+		{
+			name: "ruby",
+			path: "sample.rb",
+			code: "def alpha\n  1\nend\n\n" +
+				"class Example\n  def beta\n    2\n  end\nend\n",
+			want: []string{
+				"function:alpha",
+				"type:Example",
+				"function:beta",
+			},
+			contextUnit:       "beta",
+			wantContextNames:  []string{"Example"},
+			wantContextSource: "class Example",
+		},
+		{
+			name: "php",
+			path: "sample.php",
+			code: "<?php\nfunction alpha() { return 1; }\n" +
+				"class Example { function beta() { return 2; } }\n",
+			want: []string{
+				"function:alpha",
+				"type:Example",
+				"function:beta",
+			},
+			contextUnit:       "beta",
+			wantContextNames:  []string{"Example"},
+			wantContextSource: "class Example",
+		},
+		{
+			name: "kotlin",
+			path: "Sample.kt",
+			code: "fun alpha() {}\n" +
+				"class Example {\n  fun beta() {}\n}\n",
+			want: []string{
+				"function:alpha",
+				"type:Example",
+				"function:beta",
+			},
+			contextUnit:       "beta",
+			wantContextNames:  []string{"Example"},
+			wantContextSource: "class Example",
+		},
+		{
+			name: "c",
+			path: "sample.c",
+			code: "struct Example { int value; };\n" +
+				"int beta(struct Example value) { return value.value; }\n",
+			want: []string{
+				"type:Example",
+				"function:beta",
+			},
+			contextUnit:       "beta",
+			wantContextNames:  []string{"Example"},
+			wantContextSource: "struct Example",
+		},
+		{
+			name: "cpp",
+			path: "sample.cpp",
+			code: "class Example {\npublic:\n  int beta() { return 2; }\n};\n" +
+				"int alpha() { return 1; }\n",
+			want: []string{
+				"type:Example",
+				"function:beta",
+				"function:alpha",
+			},
+			contextUnit:       "beta",
+			wantContextNames:  []string{"Example"},
+			wantContextSource: "class Example",
+		},
 	}
 
 	for _, test := range tests {
@@ -84,7 +188,10 @@ func TestExtractCodeUnits(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
 
-			units, err := NewExtractor().Extract(test.path, []byte(test.code))
+			units, err := testExtractorForPath(t, test.path).Extract(
+				test.path,
+				[]byte(test.code),
+			)
 			if err != nil {
 				t.Fatalf("Extract() error = %v", err)
 			}
@@ -139,12 +246,121 @@ func TestExtractCodeUnits(t *testing.T) {
 func TestExtractRejectsInvalidInput(t *testing.T) {
 	t.Parallel()
 
-	extractor := NewExtractor()
+	extractor := testExtractor(t, "go")
 	if _, err := extractor.Extract("broken.go", []byte("package sample\nfunc {")); err == nil {
 		t.Fatal("Extract() malformed source error = nil")
 	}
 	if _, err := extractor.Extract("sample.txt", []byte("not code")); err == nil {
 		t.Fatal("Extract() unsupported source error = nil")
+	}
+}
+
+func TestLanguagePresetsCompile(t *testing.T) {
+	t.Parallel()
+
+	presets := []string{
+		"c",
+		"cpp",
+		"csharp",
+		"go",
+		"java",
+		"javascript",
+		"kotlin",
+		"php",
+		"python",
+		"ruby",
+		"rust",
+		"tsx",
+		"typescript",
+	}
+	for _, preset := range presets {
+		preset := preset
+		t.Run(preset, func(t *testing.T) {
+			t.Parallel()
+			testExtractor(t, preset)
+		})
+	}
+}
+
+func TestNewExtractorAppliesLanguageOverrides(t *testing.T) {
+	t.Parallel()
+
+	extractor, err := NewExtractor(map[string]config.Language{
+		"go": {
+			Extensions: []string{".golang"},
+			Regions: map[string][]string{
+				"statement": {"return_statement"},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewExtractor() error = %v", err)
+	}
+	if extractor.Supports("sample.go") || !extractor.Supports("sample.golang") {
+		t.Fatalf("Extensions() = %v, want only .golang", extractor.Extensions())
+	}
+	units, err := extractor.Extract(
+		"sample.golang",
+		[]byte("package sample\n\nfunc Read() int { return 1 }\n"),
+	)
+	if err != nil {
+		t.Fatalf("Extract() error = %v", err)
+	}
+	unit := findUnit(units, CodeKindFunction, "Read")
+	if unit == nil || len(unit.Regions) != 1 ||
+		unit.Regions[0].Kind != "return_statement" {
+		t.Fatalf("Extract() regions = %#v", units)
+	}
+}
+
+func TestNewExtractorRejectsInvalidLanguageConfiguration(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]struct {
+		languages map[string]config.Language
+		want      string
+	}{
+		"extension collision": {
+			languages: map[string]config.Language{
+				"go":   {Extensions: []string{".rs"}},
+				"rust": {},
+			},
+			want: `language extension ".rs" is assigned to both "go" and "rust"`,
+		},
+		"invalid query": {
+			languages: map[string]config.Language{
+				"go": {FunctionQueries: []string{"(function_declaration"}},
+			},
+			want: "compile go function query",
+		},
+		"missing target capture": {
+			languages: map[string]config.Language{
+				"go": {FunctionQueries: []string{
+					"(function_declaration name: (identifier) @name)",
+				}},
+			},
+			want: "go function query must capture @function",
+		},
+		"missing name capture": {
+			languages: map[string]config.Language{
+				"go": {FunctionQueries: []string{
+					"(function_declaration) @function",
+				}},
+			},
+			want: "go function query must capture @name",
+		},
+	}
+
+	for name, test := range tests {
+		test := test
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			_, err := NewExtractor(test.languages)
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("NewExtractor() error = %v, want it to contain %q", err, test.want)
+			}
+		})
 	}
 }
 
@@ -199,6 +415,62 @@ func TestExtractIncludesLeadingDocumentationComments(t *testing.T) {
 			unit: "alpha",
 			want: "/// Explains alpha.",
 		},
+		{
+			name: "java type",
+			path: "Sample.java",
+			code: "// Describes Example.\nclass Example {}\n",
+			kind: CodeKindType,
+			unit: "Example",
+			want: "// Describes Example.",
+		},
+		{
+			name: "csharp type",
+			path: "Sample.cs",
+			code: "// Describes Example.\nclass Example {}\n",
+			kind: CodeKindType,
+			unit: "Example",
+			want: "// Describes Example.",
+		},
+		{
+			name: "ruby function",
+			path: "sample.rb",
+			code: "# Explains alpha.\ndef alpha\nend\n",
+			kind: CodeKindFunction,
+			unit: "alpha",
+			want: "# Explains alpha.",
+		},
+		{
+			name: "php function",
+			path: "sample.php",
+			code: "<?php\n// Explains alpha.\nfunction alpha() {}\n",
+			kind: CodeKindFunction,
+			unit: "alpha",
+			want: "// Explains alpha.",
+		},
+		{
+			name: "kotlin type",
+			path: "Sample.kt",
+			code: "// Describes Example.\nclass Example {}\n",
+			kind: CodeKindType,
+			unit: "Example",
+			want: "// Describes Example.",
+		},
+		{
+			name: "c type",
+			path: "sample.c",
+			code: "/** Describes Example. */\nstruct Example { int value; };\n",
+			kind: CodeKindType,
+			unit: "Example",
+			want: "/** Describes Example. */",
+		},
+		{
+			name: "cpp type",
+			path: "sample.cpp",
+			code: "// Describes Example.\nclass Example {};\n",
+			kind: CodeKindType,
+			unit: "Example",
+			want: "// Describes Example.",
+		},
 	}
 
 	for _, test := range tests {
@@ -206,7 +478,10 @@ func TestExtractIncludesLeadingDocumentationComments(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
 
-			units, err := NewExtractor().Extract(test.path, []byte(test.code))
+			units, err := testExtractorForPath(t, test.path).Extract(
+				test.path,
+				[]byte(test.code),
+			)
 			if err != nil {
 				t.Fatalf("Extract() error = %v", err)
 			}
@@ -224,7 +499,7 @@ func TestExtractIncludesLeadingDocumentationComments(t *testing.T) {
 func TestExtractExcludesCommentsSeparatedByBlankLine(t *testing.T) {
 	t.Parallel()
 
-	units, err := NewExtractor().Extract(
+	units, err := testExtractor(t, "go").Extract(
 		"sample.go",
 		[]byte("package sample\n\n// Unrelated.\n\nfunc Alpha() {}\n"),
 	)
@@ -245,7 +520,7 @@ func TestExtractIncludesBoundedLocalizationRegions(t *testing.T) {
 
 	source := "package sample\n\n// FeatureFlags controls behavior.\n" +
 		"type FeatureFlags struct {\n\tEnabled bool\n\tIsReady bool\n}\n"
-	units, err := NewExtractor().Extract("flags.go", []byte(source))
+	units, err := testExtractor(t, "go").Extract("flags.go", []byte(source))
 	if err != nil {
 		t.Fatalf("Extract() error = %v", err)
 	}
@@ -272,6 +547,114 @@ func TestExtractIncludesBoundedLocalizationRegions(t *testing.T) {
 	}
 }
 
+func TestNewLanguagePresetsCategorizeRegions(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		path string
+		code string
+	}{
+		{
+			name: "java",
+			path: "Sample.java",
+			code: "class Example {\n" +
+				"  // Controls behavior.\n" +
+				"  boolean enabled;\n" +
+				"  int beta() { return 1; }\n" +
+				"}\n",
+		},
+		{
+			name: "csharp",
+			path: "Sample.cs",
+			code: "class Example {\n" +
+				"  // Controls behavior.\n" +
+				"  bool Enabled;\n" +
+				"  int Beta() { return 1; }\n" +
+				"}\n",
+		},
+		{
+			name: "ruby",
+			path: "sample.rb",
+			code: "class Example\n" +
+				"  # Controls behavior.\n" +
+				"  def beta\n" +
+				"    @enabled = true\n" +
+				"    return 1\n" +
+				"  end\n" +
+				"end\n",
+		},
+		{
+			name: "php",
+			path: "sample.php",
+			code: "<?php\nclass Example {\n" +
+				"  // Controls behavior.\n" +
+				"  public bool $enabled;\n" +
+				"  function beta() { return 1; }\n" +
+				"}\n",
+		},
+		{
+			name: "kotlin",
+			path: "Sample.kt",
+			code: "class Example {\n" +
+				"  // Controls behavior.\n" +
+				"  val enabled: Boolean = true\n" +
+				"  fun beta() {\n" +
+				"    println(enabled)\n" +
+				"  }\n" +
+				"}\n",
+		},
+		{
+			name: "c",
+			path: "sample.c",
+			code: "struct Example {\n" +
+				"  /* Controls behavior. */\n" +
+				"  int enabled;\n" +
+				"};\n" +
+				"int beta(void) { return 1; }\n",
+		},
+		{
+			name: "cpp",
+			path: "sample.cpp",
+			code: "class Example {\n" +
+				"  // Controls behavior.\n" +
+				"  bool enabled;\n" +
+				"  int beta() { return 1; }\n" +
+				"};\n",
+		},
+	}
+
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			units, err := testExtractorForPath(t, test.path).Extract(
+				test.path,
+				[]byte(test.code),
+			)
+			if err != nil {
+				t.Fatalf("Extract() error = %v", err)
+			}
+			categories := make(map[string]bool)
+			for _, unit := range units {
+				for _, region := range unit.Regions {
+					categories[region.Category] = true
+				}
+			}
+			for _, category := range []string{"comment", "field", "statement"} {
+				if !categories[category] {
+					t.Errorf(
+						"Extract() region categories = %v, missing %q",
+						categories,
+						category,
+					)
+				}
+			}
+		})
+	}
+}
+
 func findUnit(units []CodeUnit, kind CodeKind, name string) *CodeUnit {
 	for index := range units {
 		if units[index].Kind == kind && units[index].Name == name {
@@ -279,4 +662,42 @@ func findUnit(units []CodeUnit, kind CodeKind, name string) *CodeUnit {
 		}
 	}
 	return nil
+}
+
+func testExtractorForPath(t *testing.T, path string) *Extractor {
+	t.Helper()
+
+	presets := map[string]string{
+		".c":    "c",
+		".cpp":  "cpp",
+		".cs":   "csharp",
+		".go":   "go",
+		".java": "java",
+		".js":   "javascript",
+		".kt":   "kotlin",
+		".php":  "php",
+		".py":   "python",
+		".rb":   "ruby",
+		".rs":   "rust",
+		".ts":   "typescript",
+	}
+	preset, ok := presets[strings.ToLower(filepath.Ext(path))]
+	if !ok {
+		t.Fatalf("no test language preset for %q", path)
+	}
+	return testExtractor(t, preset)
+}
+
+func testExtractor(t *testing.T, presets ...string) *Extractor {
+	t.Helper()
+
+	enabled := make(map[string]config.Language, len(presets))
+	for _, preset := range presets {
+		enabled[preset] = config.Language{}
+	}
+	extractor, err := NewExtractor(enabled)
+	if err != nil {
+		t.Fatalf("NewExtractor() error = %v", err)
+	}
+	return extractor
 }

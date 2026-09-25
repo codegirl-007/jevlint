@@ -72,7 +72,14 @@ func highlightedLines(source string, language string, color bool) []string {
 	}
 
 	lexer := map[string]string{
+		"c":          "c",
+		"cpp":        "cpp",
+		"csharp":     "csharp",
+		"java":       "java",
 		"javascript": "javascript",
+		"kotlin":     "kotlin",
+		"php":        "php",
+		"ruby":       "ruby",
 		"typescript": "typescript",
 		"tsx":        "tsx",
 		"python":     "python",

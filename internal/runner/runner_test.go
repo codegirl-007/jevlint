@@ -26,6 +26,10 @@ type barrierEvaluator struct {
 
 type booleanFieldEvaluator struct{}
 
+type cacheStatsEvaluator struct {
+	stats evaluation.CacheStats
+}
+
 func (booleanFieldEvaluator) Evaluate(
 	_ context.Context,
 	batch evaluation.Batch,
@@ -91,6 +95,26 @@ func (evaluator *recordingEvaluator) Evaluate(
 	}, nil
 }
 
+func (evaluator *cacheStatsEvaluator) Evaluate(
+	_ context.Context,
+	batch evaluation.Batch,
+) (map[string]evaluation.Result, error) {
+	evaluator.stats.Misses++
+	evaluator.stats.Writes++
+	results := make(map[string]evaluation.Result, len(batch.Rules))
+	for _, rule := range batch.Rules {
+		results[rule.ID] = evaluation.Result{
+			Status:     evaluation.StatusPass,
+			Confidence: 1,
+		}
+	}
+	return results, nil
+}
+
+func (evaluator *cacheStatsEvaluator) CacheStats() evaluation.CacheStats {
+	return evaluator.stats
+}
+
 func TestCheckBatchesRulesPerFunctionAndRetainsSnippet(t *testing.T) {
 	t.Parallel()
 
@@ -115,7 +139,7 @@ func TestCheckBatchesRulesPerFunctionAndRetainsSnippet(t *testing.T) {
 	}}
 	evaluator := &recordingEvaluator{}
 	report, err := (Runner{
-		Extractor: parsing.NewExtractor(),
+		Extractor: testGoExtractor(t),
 		Evaluator: evaluator,
 	}).Check(context.Background(), cfg, Options{Root: root, Concurrency: 1})
 	if err != nil {
@@ -183,7 +207,7 @@ func TestCheckEvaluatesFunctionsConcurrently(t *testing.T) {
 	done := make(chan checkResult, 1)
 	go func() {
 		report, err := (Runner{
-			Extractor: parsing.NewExtractor(),
+			Extractor: testGoExtractor(t),
 			Evaluator: evaluator,
 		}).Check(context.Background(), cfg, Options{
 			Root:        root,
@@ -207,6 +231,36 @@ func TestCheckEvaluatesFunctionsConcurrently(t *testing.T) {
 	}
 	if result.report.Evaluations != 2 {
 		t.Fatalf("evaluations = %d, want 2", result.report.Evaluations)
+	}
+}
+
+func TestCheckReportsCacheStatsForCurrentRun(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(
+		filepath.Join(root, "sample.go"),
+		[]byte("package sample\n\nfunc Read() {}\n"),
+		0o600,
+	); err != nil {
+		t.Fatalf("write source: %v", err)
+	}
+	evaluator := &cacheStatsEvaluator{
+		stats: evaluation.CacheStats{Hits: 10, Misses: 20, Writes: 15},
+	}
+	report, err := (Runner{
+		Extractor: testGoExtractor(t),
+		Evaluator: evaluator,
+	}).Check(context.Background(), config.Config{Rules: []config.Rule{{
+		ID:          "rule",
+		Description: "A rule.",
+		Severity:    config.SeverityInfo,
+		Kinds:       []string{"function"},
+	}}}, Options{Root: root, Concurrency: 1})
+	if err != nil {
+		t.Fatalf("Check() error = %v", err)
+	}
+	want := evaluation.CacheStats{Misses: 1, Writes: 1}
+	if report.Cache == nil || *report.Cache != want {
+		t.Fatalf("cache stats = %#v, want %#v", report.Cache, want)
 	}
 }
 
@@ -297,7 +351,7 @@ func TestCheckLocalizesFailedRuleToTreeSitterRegion(t *testing.T) {
 		Localize:    []string{"field"},
 	}}}
 	report, err := (Runner{
-		Extractor: parsing.NewExtractor(),
+		Extractor: testGoExtractor(t),
 		Evaluator: booleanFieldEvaluator{},
 	}).Check(context.Background(), cfg, Options{Root: root, Concurrency: 2})
 	if err != nil {
@@ -358,7 +412,7 @@ func TestDiscoverFiltersDeduplicatesAndSortsFiles(t *testing.T) {
 	discovered, err := discover(
 		root,
 		[]string{".", "z.go", filepath.Join(root, "nested"), "nested/notes.txt"},
-		parsing.NewExtractor(),
+		testExtractor(t, "go", "typescript"),
 	)
 	if err != nil {
 		t.Fatalf("discover() error = %v", err)
@@ -376,8 +430,28 @@ func TestDiscoverRejectsMissingPath(t *testing.T) {
 	t.Parallel()
 
 	root := t.TempDir()
-	_, err := discover(root, []string{"missing"}, parsing.NewExtractor())
+	_, err := discover(root, []string{"missing"}, testGoExtractor(t))
 	if err == nil || !strings.Contains(err.Error(), `inspect "missing"`) {
 		t.Fatalf("discover() error = %v", err)
 	}
+}
+
+func testGoExtractor(t *testing.T) *parsing.Extractor {
+	t.Helper()
+
+	return testExtractor(t, "go")
+}
+
+func testExtractor(t *testing.T, presets ...string) *parsing.Extractor {
+	t.Helper()
+
+	languages := make(map[string]config.Language, len(presets))
+	for _, preset := range presets {
+		languages[preset] = config.Language{}
+	}
+	extractor, err := parsing.NewExtractor(languages)
+	if err != nil {
+		t.Fatalf("NewExtractor() error = %v", err)
+	}
+	return extractor
 }
