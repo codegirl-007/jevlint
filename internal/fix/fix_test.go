@@ -89,9 +89,26 @@ func TestGenerateRejectsUnexpectedFiles(t *testing.T) {
 	}
 }
 
+func TestGenerateAcceptsEditsToExistingSnapshotFiles(t *testing.T) {
+	root := writeFixProject(t)
+	t.Setenv("JEVLINT_ACP_HELPER", "modify-context")
+
+	proposal, err := Generate(context.Background(), Options{
+		Root:       root,
+		ConfigPath: filepath.Join(root, "jevlint.json"),
+		Command:    []string{os.Args[0], "-test.run=TestACPHelperProcess"},
+		Findings:   []runner.Finding{testFinding()},
+	})
+	if err != nil {
+		t.Fatalf("Generate() error = %v", err)
+	}
+	if len(proposal.Changes) != 1 || proposal.Changes[0].Path != "jevlint.json" {
+		t.Fatalf("Generate() proposal = %#v", proposal)
+	}
+}
+
 func TestGenerateRejectsUnsafeWorkspaceChanges(t *testing.T) {
 	tests := map[string]string{
-		"modify-context": "modified file without a finding",
 		"remove-context": "removed",
 		"replace-target": "replaced",
 	}
@@ -154,7 +171,7 @@ func TestBuildPromptDescribesSnapshotAndTargetedChecks(t *testing.T) {
 	prompt := buildPrompt([]runner.Finding{testFinding()})
 	for _, expected := range []string{
 		"safe project snapshot",
-		"only edit files listed in the findings",
+		"inspect and edit existing project files",
 		"targeted formatters, type checks, or tests",
 		"call jevlint_check",
 		"Do not finish until jevlint_check reports no findings",

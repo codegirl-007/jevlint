@@ -75,10 +75,7 @@ func Generate(ctx context.Context, options Options) (Proposal, error) {
 	if err != nil {
 		return Proposal{}, err
 	}
-	writable, err := writablePaths(workspace, options.Findings)
-	if err != nil {
-		return Proposal{}, err
-	}
+	writable := writablePaths(workspace, before)
 	client := &acpClient{
 		root:         workspace,
 		writable:     writable,
@@ -98,7 +95,7 @@ func Generate(ctx context.Context, options Options) (Proposal, error) {
 		return Proposal{}, err
 	}
 	reportProgress(options.Progress, "inspecting proposed changes")
-	changes, err := changedFiles(workspace, before, writable)
+	changes, err := changedFiles(workspace, before)
 	if err != nil {
 		return Proposal{}, err
 	}
@@ -116,26 +113,18 @@ func reportProgress(progress func(string), message string) {
 
 func writablePaths(
 	workspace string,
-	findings []runner.Finding,
-) (map[string]struct{}, error) {
-	writable := make(map[string]struct{})
-	for _, finding := range findings {
-		relative := filepath.FromSlash(finding.Path)
-		if !filepath.IsLocal(relative) {
-			return nil, fmt.Errorf(
-				"finding path escapes project root: %q",
-				finding.Path,
-			)
-		}
-		writable[filepath.Join(workspace, relative)] = struct{}{}
+	before map[string][]byte,
+) map[string]struct{} {
+	writable := make(map[string]struct{}, len(before))
+	for relative := range before {
+		writable[filepath.Join(workspace, filepath.FromSlash(relative))] = struct{}{}
 	}
-	return writable, nil
+	return writable
 }
 
 func changedFiles(
 	workspace string,
 	before map[string][]byte,
-	writable map[string]struct{},
 ) ([]FileChange, error) {
 	if err := rejectUnexpectedFiles(workspace, before); err != nil {
 		return nil, err
@@ -165,12 +154,6 @@ func changedFiles(
 		}
 		if bytes.Equal(before[relative], after) {
 			continue
-		}
-		if _, ok := writable[path]; !ok {
-			return nil, fmt.Errorf(
-				"ACP agent modified file without a finding: %q",
-				relative,
-			)
 		}
 		changes = append(changes, FileChange{
 			Path:   relative,
@@ -310,8 +293,8 @@ func buildPrompt(findings []runner.Finding) string {
 	var prompt strings.Builder
 	prompt.WriteString(
 		"Fix every Jevlint finding below by editing the existing files in this " +
-			"safe project snapshot. You may inspect any available project file, but " +
-			"only edit files listed in the findings. Do not create, delete, or rename " +
+			"safe project snapshot. You may inspect and edit existing project files. " +
+			"Do not create, delete, or rename " +
 			"files. Keep behavior unchanged except where required by the rules. Run " +
 			"targeted formatters, type checks, or tests when their dependencies are " +
 			"available; unavailable project services or dependencies are not a reason " +

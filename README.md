@@ -160,12 +160,11 @@ on the snapshot. It must keep fixing until that check reports no findings.
 The tool only checks; it cannot apply fixes or use the cache. Terminals stay
 disabled.
 
-The agent can read mirrored files, but it may edit only files with findings.
-After the session, Jevlint rejects created, deleted, replaced, or unauthorized
-modified files. Proposed source must parse and pass Jev validation before its
-diff is shown. Candidate evaluations are not cached. The ACP client does not
-provide terminal access, though the configured agent executable may have its
-own local tools for targeted formatting and tests.
+The agent can read and edit mirrored files. After the session, Jevlint rejects
+created, deleted, or replaced files. Proposed source must parse and pass Jev
+validation before its diff is shown. Candidate evaluations are not cached. The
+ACP client does not provide terminal access, though the configured agent
+executable may have its own local tools for targeted formatting and tests.
 
 The configured agent is an external process and may send mirrored source to its
 model provider. The temporary workspace is not an operating-system sandbox; the
@@ -214,7 +213,7 @@ before a run. `--fix` also bypasses the cache.
 - Database provenance and cross-function data flow are not traced.
 - Jev returns a constrained choice, not a free-form explanation.
 - Autofix cannot create, delete, or rename files.
-- `fix` and `--fix` write only validated edits to existing finding files.
+- `fix` and `--fix` write only validated edits to existing snapshot files.
 
 ## Exit codes
 
