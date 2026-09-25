@@ -67,6 +67,13 @@ type choiceAnswer struct {
 	Confidence *float64 `json:"confidence"`
 }
 
+type attemptResponse struct {
+	body       []byte
+	header     http.Header
+	statusCode int
+	requestErr error
+}
+
 func NewTypeSafeFromEnv() (*TypeSafe, error) {
 	return NewTypeSafe(TypeSafeOptions{
 		APIKey:  os.Getenv("TYPESAFE_API_KEY"),
@@ -202,59 +209,102 @@ func (client *TypeSafe) Evaluate(ctx context.Context, batch Batch) (map[string]R
 
 func (client *TypeSafe) perform(ctx context.Context, body []byte) ([]byte, error) {
 	for attempt := 0; ; attempt++ {
-		request, err := http.NewRequestWithContext(
-			ctx,
-			http.MethodPost,
-			client.baseURL+"/v1/systemone",
-			bytes.NewReader(body),
-		)
+		response, err := client.performAttempt(ctx, body, attempt)
 		if err != nil {
-			return nil, fmt.Errorf("create TypeSafe request: %w", err)
+			return nil, err
 		}
-		request.Header.Set("Authorization", "Bearer "+client.apiKey)
-		request.Header.Set("Accept", "application/json")
-		request.Header.Set("Content-Type", "application/json")
-		request.Header.Set("User-Agent", "jevlint/0.1.0")
-		request.Header.Set("X-TypeSafe-SDK", "jevlint/0.1.0")
-		request.Header.Set("X-TypeSafe-Runtime", runtime.Version())
-		if attempt > 0 {
-			request.Header.Set("X-TypeSafe-Retry-Count", strconv.Itoa(attempt))
+		if response.requestErr != nil && ctx.Err() != nil {
+			return nil, ctx.Err()
 		}
-
-		response, requestErr := client.httpClient.Do(request)
-		if requestErr != nil {
-			if ctx.Err() != nil {
-				return nil, ctx.Err()
-			}
-			if attempt >= client.maxRetries {
-				return nil, fmt.Errorf("TypeSafe request failed: %w", requestErr)
-			}
-			if err := client.sleep(ctx, retryDelay(attempt, nil)); err != nil {
-				return nil, err
-			}
-			continue
+		if response.succeeded() {
+			return response.body, nil
 		}
-
-		responseBody, readErr := io.ReadAll(io.LimitReader(response.Body, maxResponseBytes))
-		closeErr := response.Body.Close()
-		if readErr != nil {
-			return nil, fmt.Errorf("read TypeSafe response: %w", readErr)
+		if attempt >= client.maxRetries || !response.retryable() {
+			return nil, response.err()
 		}
-		if closeErr != nil {
-			return nil, fmt.Errorf("close TypeSafe response: %w", closeErr)
+		if err := client.sleep(ctx, retryDelay(attempt, response.header)); err != nil {
+			return nil, err
 		}
-
-		if response.StatusCode >= 200 && response.StatusCode < 300 {
-			return responseBody, nil
-		}
-		if retryableStatus(response.StatusCode) && attempt < client.maxRetries {
-			if err := client.sleep(ctx, retryDelay(attempt, response.Header)); err != nil {
-				return nil, err
-			}
-			continue
-		}
-		return nil, responseError(response.StatusCode, response.Header, responseBody)
 	}
+}
+
+func (client *TypeSafe) performAttempt(
+	ctx context.Context,
+	body []byte,
+	attempt int,
+) (attemptResponse, error) {
+	request, err := client.newRequest(ctx, body, attempt)
+	if err != nil {
+		return attemptResponse{}, err
+	}
+	response, err := client.httpClient.Do(request)
+	if err != nil {
+		return attemptResponse{requestErr: err}, nil
+	}
+	responseBody, err := readResponse(response)
+	if err != nil {
+		return attemptResponse{}, err
+	}
+	return attemptResponse{
+		body:       responseBody,
+		header:     response.Header,
+		statusCode: response.StatusCode,
+	}, nil
+}
+
+func (client *TypeSafe) newRequest(
+	ctx context.Context,
+	body []byte,
+	attempt int,
+) (*http.Request, error) {
+	request, err := http.NewRequestWithContext(
+		ctx,
+		http.MethodPost,
+		client.baseURL+"/v1/systemone",
+		bytes.NewReader(body),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("create TypeSafe request: %w", err)
+	}
+	request.Header.Set("Authorization", "Bearer "+client.apiKey)
+	request.Header.Set("Accept", "application/json")
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("User-Agent", "jevlint/0.1.0")
+	request.Header.Set("X-TypeSafe-SDK", "jevlint/0.1.0")
+	request.Header.Set("X-TypeSafe-Runtime", runtime.Version())
+	if attempt > 0 {
+		request.Header.Set("X-TypeSafe-Retry-Count", strconv.Itoa(attempt))
+	}
+	return request, nil
+}
+
+func readResponse(response *http.Response) ([]byte, error) {
+	body, readErr := io.ReadAll(io.LimitReader(response.Body, maxResponseBytes))
+	closeErr := response.Body.Close()
+	if readErr != nil {
+		return nil, fmt.Errorf("read TypeSafe response: %w", readErr)
+	}
+	if closeErr != nil {
+		return nil, fmt.Errorf("close TypeSafe response: %w", closeErr)
+	}
+	return body, nil
+}
+
+func (response attemptResponse) succeeded() bool {
+	return response.requestErr == nil &&
+		response.statusCode >= 200 &&
+		response.statusCode < 300
+}
+
+func (response attemptResponse) retryable() bool {
+	return response.requestErr != nil || retryableStatus(response.statusCode)
+}
+
+func (response attemptResponse) err() error {
+	if response.requestErr != nil {
+		return fmt.Errorf("TypeSafe request failed: %w", response.requestErr)
+	}
+	return responseError(response.statusCode, response.header, response.body)
 }
 
 func instructionsFor(

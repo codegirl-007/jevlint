@@ -153,6 +153,34 @@ func (extractor *Extractor) Extract(path string, source []byte) ([]CodeUnit, err
 		return nil, fmt.Errorf("unsupported source file %q", path)
 	}
 
+	tree, err := parseSource(spec, path, source)
+	if err != nil {
+		return nil, err
+	}
+	defer tree.Close()
+
+	root := tree.RootNode()
+	functions, types, err := extractPrimaryUnits(spec, path, source, root)
+	if err != nil {
+		return nil, err
+	}
+	declarations, err := extractTypeDeclarations(spec, path, source, root, types)
+	if err != nil {
+		return nil, err
+	}
+	attachRelatedTypes(functions, declarations)
+
+	units := append(functions, types...)
+	attachRegions(units, extractRegions(root, source, spec.regionKinds))
+	sortCodeUnits(units)
+	return units, nil
+}
+
+func parseSource(
+	spec languageSpec,
+	path string,
+	source []byte,
+) (*tree_sitter.Tree, error) {
 	parser := tree_sitter.NewParser()
 	defer parser.Close()
 	if err := parser.SetLanguage(spec.language); err != nil {
@@ -163,13 +191,20 @@ func (extractor *Extractor) Extract(path string, source []byte) ([]CodeUnit, err
 	if tree == nil {
 		return nil, fmt.Errorf("parse %q: parser returned no syntax tree", path)
 	}
-	defer tree.Close()
 
 	root := tree.RootNode()
 	if root.HasError() {
 		return nil, fmt.Errorf("parse %q: source contains syntax errors", path)
 	}
+	return tree, nil
+}
 
+func extractPrimaryUnits(
+	spec languageSpec,
+	path string,
+	source []byte,
+	root *tree_sitter.Node,
+) ([]CodeUnit, []CodeUnit, error) {
 	functions, err := extractMatches(
 		spec,
 		path,
@@ -180,7 +215,7 @@ func (extractor *Extractor) Extract(path string, source []byte) ([]CodeUnit, err
 		CodeKindFunction,
 	)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	types, err := extractMatches(
 		spec,
@@ -192,20 +227,19 @@ func (extractor *Extractor) Extract(path string, source []byte) ([]CodeUnit, err
 		CodeKindType,
 	)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
+	return functions, types, nil
+}
 
-	declarations := make([]TypeDeclaration, 0, len(types))
-	for _, unit := range types {
-		declarations = append(declarations, TypeDeclaration{
-			Name:      unit.Name,
-			Source:    unit.Source,
-			StartLine: unit.StartLine,
-			EndLine:   unit.EndLine,
-			StartByte: unit.StartByte,
-			EndByte:   unit.EndByte,
-		})
-	}
+func extractTypeDeclarations(
+	spec languageSpec,
+	path string,
+	source []byte,
+	root *tree_sitter.Node,
+	types []CodeUnit,
+) ([]TypeDeclaration, error) {
+	declarations := typeDeclarations(types)
 	if spec.typeContextQuery != "" {
 		contextTypes, err := extractMatches(
 			spec,
@@ -219,17 +253,27 @@ func (extractor *Extractor) Extract(path string, source []byte) ([]CodeUnit, err
 		if err != nil {
 			return nil, err
 		}
-		for _, unit := range contextTypes {
-			declarations = append(declarations, TypeDeclaration{
-				Name:      unit.Name,
-				Source:    unit.Source,
-				StartLine: unit.StartLine,
-				EndLine:   unit.EndLine,
-				StartByte: unit.StartByte,
-				EndByte:   unit.EndByte,
-			})
-		}
+		declarations = append(declarations, typeDeclarations(contextTypes)...)
 	}
+	return declarations, nil
+}
+
+func typeDeclarations(units []CodeUnit) []TypeDeclaration {
+	declarations := make([]TypeDeclaration, 0, len(units))
+	for _, unit := range units {
+		declarations = append(declarations, TypeDeclaration{
+			Name:      unit.Name,
+			Source:    unit.Source,
+			StartLine: unit.StartLine,
+			EndLine:   unit.EndLine,
+			StartByte: unit.StartByte,
+			EndByte:   unit.EndByte,
+		})
+	}
+	return declarations
+}
+
+func attachRelatedTypes(functions []CodeUnit, declarations []TypeDeclaration) {
 	for index := range functions {
 		for _, declaration := range declarations {
 			if declarationContains(declaration, functions[index]) ||
@@ -241,9 +285,9 @@ func (extractor *Extractor) Extract(path string, source []byte) ([]CodeUnit, err
 			}
 		}
 	}
+}
 
-	units := append(functions, types...)
-	regions := extractRegions(root, source, spec.regionKinds)
+func attachRegions(units []CodeUnit, regions []Region) {
 	for index := range units {
 		for _, region := range regions {
 			if region.StartByte < units[index].StartByte ||
@@ -256,13 +300,15 @@ func (extractor *Extractor) Extract(path string, source []byte) ([]CodeUnit, err
 			}
 		}
 	}
+}
+
+func sortCodeUnits(units []CodeUnit) {
 	sort.SliceStable(units, func(i, j int) bool {
 		if units[i].StartByte == units[j].StartByte {
 			return units[i].Kind == CodeKindType
 		}
 		return units[i].StartByte < units[j].StartByte
 	})
-	return units, nil
 }
 
 func extractMatches(

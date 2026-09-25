@@ -2,6 +2,7 @@ package runner
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -32,11 +33,11 @@ func (booleanFieldEvaluator) Evaluate(
 	status := evaluation.StatusPass
 	if batch.CodeUnit.Kind == parsing.CodeKindType ||
 		batch.CodeUnit.Kind == parsing.CodeKindRegion &&
-			strings.HasPrefix(batch.CodeUnit.Source, "Enabled") {
+			strings.HasPrefix(batch.CodeUnit.Source, "Flag") {
 		status = evaluation.StatusFail
 	}
 	return map[string]evaluation.Result{
-		"boolean-property-prefix": {
+		"boolean-property-naming": {
 			Status:     status,
 			Confidence: 1,
 		},
@@ -209,20 +210,88 @@ func TestCheckEvaluatesFunctionsConcurrently(t *testing.T) {
 	}
 }
 
+func TestRunJobsPreservesInputOrder(t *testing.T) {
+	releases := []chan struct{}{
+		make(chan struct{}),
+		make(chan struct{}),
+		make(chan struct{}),
+	}
+	started := make(chan struct{}, len(releases))
+
+	type result struct {
+		outcomes []int
+		err      error
+	}
+	done := make(chan result, 1)
+	go func() {
+		outcomes, err := runJobs(
+			context.Background(),
+			[]int{0, 1, 2},
+			3,
+			func(_ context.Context, job int) (int, error) {
+				started <- struct{}{}
+				<-releases[job]
+				return job, nil
+			},
+		)
+		done <- result{outcomes: outcomes, err: err}
+	}()
+
+	for range releases {
+		<-started
+	}
+	close(releases[2])
+	close(releases[1])
+	close(releases[0])
+
+	got := <-done
+	if got.err != nil {
+		t.Fatalf("runJobs() error = %v", got.err)
+	}
+	for index, outcome := range got.outcomes {
+		if outcome != index {
+			t.Fatalf("runJobs() outcomes = %v, want [0 1 2]", got.outcomes)
+		}
+	}
+}
+
+func TestRunJobsCancelsPeersAfterError(t *testing.T) {
+	sentinel := errors.New("evaluation failed")
+	peerStarted := make(chan struct{})
+
+	_, err := runJobs(
+		context.Background(),
+		[]int{0, 1},
+		2,
+		func(ctx context.Context, job int) (int, error) {
+			if job == 0 {
+				<-peerStarted
+				return 0, sentinel
+			}
+			close(peerStarted)
+			<-ctx.Done()
+			return 0, ctx.Err()
+		},
+	)
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("runJobs() error = %v, want %v", err, sentinel)
+	}
+}
+
 func TestCheckLocalizesFailedRuleToTreeSitterRegion(t *testing.T) {
 	t.Parallel()
 
 	root := t.TempDir()
 	source := "package sample\n\n// FeatureFlags controls behavior.\n" +
-		"type FeatureFlags struct {\n\tEnabled bool\n\tIsReady bool\n}\n\n" +
+		"type FeatureFlags struct {\n\tFlag bool\n\tIsReady bool\n}\n\n" +
 		"func ReadFlags() {}\n"
 	if err := os.WriteFile(filepath.Join(root, "flags.go"), []byte(source), 0o600); err != nil {
 		t.Fatalf("write source: %v", err)
 	}
 
 	cfg := config.Config{Rules: []config.Rule{{
-		ID:          "boolean-property-prefix",
-		Description: "Boolean fields begin with Is or Should.",
+		ID:          "boolean-property-naming",
+		Description: "Boolean fields clearly describe the true state.",
 		Severity:    config.SeverityWarning,
 		Kinds:       []string{"type"},
 		Localize:    []string{"field"},
@@ -244,7 +313,7 @@ func TestCheckLocalizesFailedRuleToTreeSitterRegion(t *testing.T) {
 	if len(locations) != 1 {
 		t.Fatalf("locations = %#v", locations)
 	}
-	if locations[0].Source != "Enabled bool" ||
+	if locations[0].Source != "Flag bool" ||
 		locations[0].Category != "field" ||
 		locations[0].StartLine != 5 ||
 		locations[0].StartColumn != 1 {
@@ -260,5 +329,55 @@ func TestLocalizesToDistinguishesOmittedAndExplicitEmpty(t *testing.T) {
 	}
 	if localizesTo(config.Rule{Localize: []string{}}, "statement") {
 		t.Fatal("explicit empty localization should disable the second pass")
+	}
+}
+
+func TestDiscoverFiltersDeduplicatesAndSortsFiles(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	files := map[string]string{
+		"z.go":                         "package sample\n",
+		"nested/a.ts":                  "export function read() {}\n",
+		"nested/notes.txt":             "not source\n",
+		"node_modules/ignored.go":      "package ignored\n",
+		"nested/build/generated.py":    "def generated(): pass\n",
+		"nested/vendor/dependency.rs":  "fn dependency() {}\n",
+		"nested/.git/internal_file.go": "package hidden\n",
+	}
+	for path, contents := range files {
+		fullPath := filepath.Join(root, path)
+		if err := os.MkdirAll(filepath.Dir(fullPath), 0o700); err != nil {
+			t.Fatalf("create parent for %q: %v", path, err)
+		}
+		if err := os.WriteFile(fullPath, []byte(contents), 0o600); err != nil {
+			t.Fatalf("write %q: %v", path, err)
+		}
+	}
+
+	discovered, err := discover(
+		root,
+		[]string{".", "z.go", filepath.Join(root, "nested"), "nested/notes.txt"},
+		parsing.NewExtractor(),
+	)
+	if err != nil {
+		t.Fatalf("discover() error = %v", err)
+	}
+	want := []string{
+		filepath.Join(root, "nested/a.ts"),
+		filepath.Join(root, "z.go"),
+	}
+	if strings.Join(discovered, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("discover() files = %q, want %q", discovered, want)
+	}
+}
+
+func TestDiscoverRejectsMissingPath(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	_, err := discover(root, []string{"missing"}, parsing.NewExtractor())
+	if err == nil || !strings.Contains(err.Error(), `inspect "missing"`) {
+		t.Fatalf("discover() error = %v", err)
 	}
 }

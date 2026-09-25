@@ -88,15 +88,53 @@ type localizationOutcome struct {
 	location     *Location
 }
 
+type checkSetup struct {
+	root        string
+	paths       []string
+	concurrency int
+}
+
 func (runner Runner) Check(ctx context.Context, cfg config.Config, options Options) (Report, error) {
+	setup, err := runner.prepareCheck(options)
+	if err != nil {
+		return Report{}, err
+	}
+	files, err := discover(setup.root, setup.paths, runner.Extractor)
+	if err != nil {
+		return Report{}, err
+	}
+	report, jobs, err := runner.planEvaluations(ctx, cfg, setup.root, files)
+	if err != nil {
+		return Report{}, err
+	}
+	outcomes, err := evaluateJobs(ctx, runner.Evaluator, jobs, setup.concurrency)
+	if err != nil {
+		return Report{}, err
+	}
+	pending := collectOutcomes(&report, outcomes)
+	localizationEvaluations, err := localizeFindings(
+		ctx,
+		runner.Evaluator,
+		pending,
+		setup.concurrency,
+	)
+	if err != nil {
+		return Report{}, err
+	}
+	report.Evaluations += localizationEvaluations
+	appendFindings(&report, pending)
+	return report, nil
+}
+
+func (runner Runner) prepareCheck(options Options) (checkSetup, error) {
 	if runner.Extractor == nil {
-		return Report{}, fmt.Errorf("extractor is required")
+		return checkSetup{}, fmt.Errorf("extractor is required")
 	}
 	if runner.Evaluator == nil {
-		return Report{}, fmt.Errorf("evaluator is required")
+		return checkSetup{}, fmt.Errorf("evaluator is required")
 	}
 	if options.Concurrency < 0 {
-		return Report{}, fmt.Errorf("concurrency cannot be negative")
+		return checkSetup{}, fmt.Errorf("concurrency cannot be negative")
 	}
 	concurrency := options.Concurrency
 	if concurrency == 0 {
@@ -105,97 +143,115 @@ func (runner Runner) Check(ctx context.Context, cfg config.Config, options Optio
 
 	root, err := filepath.Abs(options.Root)
 	if err != nil {
-		return Report{}, fmt.Errorf("resolve project root: %w", err)
+		return checkSetup{}, fmt.Errorf("resolve project root: %w", err)
 	}
 	paths := options.Paths
 	if len(paths) == 0 {
 		paths = []string{"."}
 	}
+	return checkSetup{root: root, paths: paths, concurrency: concurrency}, nil
+}
 
-	files, err := discover(root, paths, runner.Extractor)
-	if err != nil {
-		return Report{}, err
-	}
-
+func (runner Runner) planEvaluations(
+	ctx context.Context,
+	cfg config.Config,
+	root string,
+	files []string,
+) (Report, []evaluationJob, error) {
 	report := Report{Findings: make([]Finding, 0)}
 	jobs := make([]evaluationJob, 0)
 	for _, file := range files {
 		if err := ctx.Err(); err != nil {
-			return Report{}, err
+			return Report{}, nil, err
 		}
-
-		relative, err := filepath.Rel(root, file)
+		fileJobs, codeUnits, scanned, err := runner.planFile(cfg, root, file)
 		if err != nil {
-			return Report{}, fmt.Errorf("make %q relative to project root: %w", file, err)
+			return Report{}, nil, err
 		}
-		relative = filepath.ToSlash(relative)
-
-		applicable := make([]config.Rule, 0, len(cfg.Rules))
-		for _, rule := range cfg.Rules {
-			applies, err := scoping.Applies(rule, relative)
-			if err != nil {
-				return Report{}, err
-			}
-			if applies {
-				applicable = append(applicable, rule)
-			}
+		if scanned {
+			report.ScannedFiles++
 		}
-		if len(applicable) == 0 {
-			continue
-		}
-
-		source, err := os.ReadFile(file)
-		if err != nil {
-			return Report{}, fmt.Errorf("read %q: %w", relative, err)
-		}
-		units, err := runner.Extractor.Extract(relative, source)
-		if err != nil {
-			return Report{}, err
-		}
-		report.ScannedFiles++
-		report.CodeUnits += len(units)
-
-		for _, unit := range units {
-			unitRules := make([]config.Rule, 0, len(applicable))
-			for _, rule := range applicable {
-				if appliesToKind(rule, unit.Kind) {
-					unitRules = append(unitRules, rule)
-				}
-			}
-			if len(unitRules) == 0 {
-				continue
-			}
-			jobs = append(jobs, evaluationJob{
-				rules: unitRules,
-				unit:  unit,
-			})
-		}
+		report.CodeUnits += codeUnits
+		jobs = append(jobs, fileJobs...)
 	}
+	return report, jobs, nil
+}
 
-	outcomes, err := evaluateJobs(ctx, runner.Evaluator, jobs, concurrency)
+func (runner Runner) planFile(
+	cfg config.Config,
+	root string,
+	file string,
+) ([]evaluationJob, int, bool, error) {
+	relative, err := filepath.Rel(root, file)
 	if err != nil {
-		return Report{}, err
+		return nil, 0, false, fmt.Errorf(
+			"make %q relative to project root: %w",
+			file,
+			err,
+		)
 	}
+	relative = filepath.ToSlash(relative)
+	applicable, err := applicableRules(cfg.Rules, relative)
+	if err != nil || len(applicable) == 0 {
+		return nil, 0, false, err
+	}
+	source, err := os.ReadFile(file)
+	if err != nil {
+		return nil, 0, false, fmt.Errorf("read %q: %w", relative, err)
+	}
+	units, err := runner.Extractor.Extract(relative, source)
+	if err != nil {
+		return nil, 0, false, err
+	}
+	return jobsForUnits(units, applicable), len(units), true, nil
+}
+
+func applicableRules(rules []config.Rule, path string) ([]config.Rule, error) {
+	applicable := make([]config.Rule, 0, len(rules))
+	for _, rule := range rules {
+		applies, err := scoping.Applies(rule, path)
+		if err != nil {
+			return nil, err
+		}
+		if applies {
+			applicable = append(applicable, rule)
+		}
+	}
+	return applicable, nil
+}
+
+func jobsForUnits(units []parsing.CodeUnit, rules []config.Rule) []evaluationJob {
+	jobs := make([]evaluationJob, 0, len(units))
+	for _, unit := range units {
+		unitRules := make([]config.Rule, 0, len(rules))
+		for _, rule := range rules {
+			if appliesToKind(rule, unit.Kind) {
+				unitRules = append(unitRules, rule)
+			}
+		}
+		if len(unitRules) > 0 {
+			jobs = append(jobs, evaluationJob{rules: unitRules, unit: unit})
+		}
+	}
+	return jobs
+}
+
+func collectOutcomes(
+	report *Report,
+	outcomes []evaluationOutcome,
+) []pendingFinding {
 	pending := make([]pendingFinding, 0)
 	for _, outcome := range outcomes {
 		report.Evaluations += outcome.evaluations
 		pending = append(pending, outcome.findings...)
 	}
+	return pending
+}
 
-	localizationEvaluations, err := localizeFindings(
-		ctx,
-		runner.Evaluator,
-		pending,
-		concurrency,
-	)
-	if err != nil {
-		return Report{}, err
-	}
-	report.Evaluations += localizationEvaluations
+func appendFindings(report *Report, pending []pendingFinding) {
 	for _, item := range pending {
 		report.Findings = append(report.Findings, item.finding)
 	}
-	return report, nil
 }
 
 func appliesToKind(rule config.Rule, kind parsing.CodeKind) bool {
@@ -216,6 +272,22 @@ func evaluateJobs(
 	jobs []evaluationJob,
 	concurrency int,
 ) ([]evaluationOutcome, error) {
+	return runJobs(
+		ctx,
+		jobs,
+		concurrency,
+		func(ctx context.Context, job evaluationJob) (evaluationOutcome, error) {
+			return evaluateJob(ctx, evaluator, job)
+		},
+	)
+}
+
+func runJobs[Job any, Outcome any](
+	ctx context.Context,
+	jobs []Job,
+	concurrency int,
+	evaluate func(context.Context, Job) (Outcome, error),
+) ([]Outcome, error) {
 	if len(jobs) == 0 {
 		return nil, nil
 	}
@@ -223,16 +295,39 @@ func evaluateJobs(
 		concurrency = len(jobs)
 	}
 
-	evaluationContext, cancel := context.WithCancel(ctx)
+	jobContext, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	indices := make(chan int, len(jobs))
-	for index := range jobs {
+	indices := queuedIndices(len(jobs))
+	outcomes := make([]Outcome, len(jobs))
+	firstError := runWorkers(jobContext, cancel, jobs, outcomes, indices, concurrency, evaluate)
+	if firstError != nil {
+		return nil, firstError
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return outcomes, nil
+}
+
+func queuedIndices(count int) <-chan int {
+	indices := make(chan int, count)
+	for index := range count {
 		indices <- index
 	}
 	close(indices)
+	return indices
+}
 
-	outcomes := make([]evaluationOutcome, len(jobs))
+func runWorkers[Job any, Outcome any](
+	ctx context.Context,
+	cancel context.CancelFunc,
+	jobs []Job,
+	outcomes []Outcome,
+	indices <-chan int,
+	concurrency int,
+	evaluate func(context.Context, Job) (Outcome, error),
+) error {
 	var workers sync.WaitGroup
 	var errorOnce sync.Once
 	var firstError error
@@ -242,10 +337,10 @@ func evaluateJobs(
 		go func() {
 			defer workers.Done()
 			for index := range indices {
-				if evaluationContext.Err() != nil {
+				if ctx.Err() != nil {
 					return
 				}
-				outcome, err := evaluateJob(evaluationContext, evaluator, jobs[index])
+				outcome, err := evaluate(ctx, jobs[index])
 				if err != nil {
 					errorOnce.Do(func() {
 						firstError = err
@@ -258,14 +353,7 @@ func evaluateJobs(
 		}()
 	}
 	workers.Wait()
-
-	if firstError != nil {
-		return nil, firstError
-	}
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	return outcomes, nil
+	return firstError
 }
 
 func evaluateJob(
@@ -342,6 +430,23 @@ func localizeFindings(
 	findings []pendingFinding,
 	concurrency int,
 ) (int, error) {
+	jobs := localizationJobs(findings)
+	outcomes, err := runJobs(
+		ctx,
+		jobs,
+		concurrency,
+		func(ctx context.Context, job localizationJob) (localizationOutcome, error) {
+			return evaluateLocalizationJob(ctx, evaluator, job)
+		},
+	)
+	if err != nil {
+		return 0, err
+	}
+	applyLocalizationOutcomes(findings, outcomes)
+	return len(jobs), nil
+}
+
+func localizationJobs(findings []pendingFinding) []localizationJob {
 	jobs := make([]localizationJob, 0)
 	for findingIndex, item := range findings {
 		for _, region := range item.unit.Regions {
@@ -356,66 +461,19 @@ func localizeFindings(
 			})
 		}
 	}
-	if len(jobs) == 0 {
-		return 0, nil
-	}
-	if concurrency > len(jobs) {
-		concurrency = len(jobs)
-	}
+	return jobs
+}
 
-	localizationContext, cancel := context.WithCancel(ctx)
-	defer cancel()
-
-	indices := make(chan int, len(jobs))
-	for index := range jobs {
-		indices <- index
-	}
-	close(indices)
-
-	outcomes := make([]localizationOutcome, len(jobs))
-	var workers sync.WaitGroup
-	var errorOnce sync.Once
-	var firstError error
-
-	workers.Add(concurrency)
-	for range concurrency {
-		go func() {
-			defer workers.Done()
-			for index := range indices {
-				if localizationContext.Err() != nil {
-					return
-				}
-				outcome, err := evaluateLocalizationJob(
-					localizationContext,
-					evaluator,
-					jobs[index],
-				)
-				if err != nil {
-					errorOnce.Do(func() {
-						firstError = err
-						cancel()
-					})
-					return
-				}
-				outcomes[index] = outcome
-			}
-		}()
-	}
-	workers.Wait()
-
-	if firstError != nil {
-		return 0, firstError
-	}
-	if err := ctx.Err(); err != nil {
-		return 0, err
-	}
+func applyLocalizationOutcomes(
+	findings []pendingFinding,
+	outcomes []localizationOutcome,
+) {
 	for _, outcome := range outcomes {
 		if outcome.location != nil {
 			item := &findings[outcome.findingIndex]
 			item.finding.Locations = append(item.finding.Locations, *outcome.location)
 		}
 	}
-	return len(jobs), nil
 }
 
 func evaluateLocalizationJob(
@@ -509,49 +567,100 @@ func (report Report) HasFailures() bool {
 func discover(root string, requested []string, extractor *parsing.Extractor) ([]string, error) {
 	seen := make(map[string]struct{})
 	for _, requestedPath := range requested {
-		path := requestedPath
-		if !filepath.IsAbs(path) {
-			path = filepath.Join(root, path)
-		}
-		path = filepath.Clean(path)
-
-		info, err := os.Stat(path)
-		if err != nil {
-			return nil, fmt.Errorf("inspect %q: %w", requestedPath, err)
-		}
-		if !info.IsDir() {
-			if extractor.Supports(path) {
-				seen[path] = struct{}{}
-			}
-			continue
-		}
-
-		err = filepath.WalkDir(path, func(candidate string, entry fs.DirEntry, walkErr error) error {
-			if walkErr != nil {
-				return walkErr
-			}
-			if entry.IsDir() {
-				if candidate != path && ignoredDirectory(entry.Name()) {
-					return filepath.SkipDir
-				}
-				return nil
-			}
-			if entry.Type().IsRegular() && extractor.Supports(candidate) {
-				seen[candidate] = struct{}{}
-			}
-			return nil
-		})
-		if err != nil {
-			return nil, fmt.Errorf("walk %q: %w", requestedPath, err)
+		if err := discoverRequestedPath(
+			root,
+			requestedPath,
+			extractor,
+			seen,
+		); err != nil {
+			return nil, err
 		}
 	}
+	return sortedDiscoveredFiles(seen), nil
+}
 
+func discoverRequestedPath(
+	root string,
+	requestedPath string,
+	extractor *parsing.Extractor,
+	seen map[string]struct{},
+) error {
+	path := resolveRequestedPath(root, requestedPath)
+	info, err := os.Stat(path)
+	if err != nil {
+		return fmt.Errorf("inspect %q: %w", requestedPath, err)
+	}
+	if !info.IsDir() {
+		addSupportedFile(path, extractor, seen)
+		return nil
+	}
+	if err := walkSupportedFiles(path, extractor, seen); err != nil {
+		return fmt.Errorf("walk %q: %w", requestedPath, err)
+	}
+	return nil
+}
+
+func resolveRequestedPath(root string, requestedPath string) string {
+	if filepath.IsAbs(requestedPath) {
+		return filepath.Clean(requestedPath)
+	}
+	return filepath.Clean(filepath.Join(root, requestedPath))
+}
+
+func walkSupportedFiles(
+	root string,
+	extractor *parsing.Extractor,
+	seen map[string]struct{},
+) error {
+	return filepath.WalkDir(root, func(
+		candidate string,
+		entry fs.DirEntry,
+		walkErr error,
+	) error {
+		return collectWalkEntry(root, candidate, entry, walkErr, extractor, seen)
+	})
+}
+
+func collectWalkEntry(
+	root string,
+	candidate string,
+	entry fs.DirEntry,
+	walkErr error,
+	extractor *parsing.Extractor,
+	seen map[string]struct{},
+) error {
+	if walkErr != nil {
+		return walkErr
+	}
+	if entry.IsDir() {
+		if candidate != root && ignoredDirectory(entry.Name()) {
+			return filepath.SkipDir
+		}
+		return nil
+	}
+	if entry.Type().IsRegular() {
+		addSupportedFile(candidate, extractor, seen)
+	}
+	return nil
+}
+
+func addSupportedFile(
+	path string,
+	extractor *parsing.Extractor,
+	seen map[string]struct{},
+) {
+	if extractor.Supports(path) {
+		seen[path] = struct{}{}
+	}
+}
+
+func sortedDiscoveredFiles(seen map[string]struct{}) []string {
 	files := make([]string, 0, len(seen))
 	for file := range seen {
 		files = append(files, file)
 	}
 	sort.Strings(files)
-	return files, nil
+	return files
 }
 
 func ignoredDirectory(name string) bool {
