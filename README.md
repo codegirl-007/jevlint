@@ -78,15 +78,17 @@ customize a preset, but it cannot load an arbitrary external grammar.
 
 - `severity`: `info`, `warning`, or `error`
 - `include` and `exclude`: doublestar file patterns
-- `kinds`: `function` or `type`
+- `kinds`: `comment`, `field`, `function`, `statement`, or `type`
 - `exceptions`: cases that should pass
 - `localize`: `comment`, `field`, or `statement`; use `[]` to disable pointers
 
 ## How it works
 
-- Functions and types are checked in parallel, four at a time by default.
+- Rules can check functions, types, comments, fields, or statements.
+- Comments, fields, and statements include their nearest function or type as context.
+- Code units are checked in parallel, four at a time by default.
 - Applicable rules are batched into one request per code unit.
-- Failed rules get a second pass to locate the relevant code.
+- Failed function and type rules can use `localize` for a focused second pass.
 - Results include syntax-highlighted snippets and pointers when available.
 - Network failures and retryable API responses are retried up to twice.
 
@@ -128,7 +130,8 @@ before a run.
 
 ## Limits
 
-- Evaluation is function- or type-declaration-sized.
+- Evaluation is scoped to the configured code-unit kinds.
+- Comments, fields, and statements receive only their nearest declaration as parent context.
 - Imports and call graphs are not followed.
 - Type context is limited to the same file.
 - Database provenance and cross-function data flow are not traced.
