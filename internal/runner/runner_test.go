@@ -537,6 +537,52 @@ func TestLocalizesToDistinguishesOmittedAndExplicitEmpty(t *testing.T) {
 	}
 }
 
+func TestCheckUsesSourceOverlayAndReportsScannedPaths(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	diskSource := "package sample\n\nfunc DiskName() {}\n"
+	if err := os.WriteFile(
+		filepath.Join(root, "sample.go"),
+		[]byte(diskSource),
+		0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+	evaluator := &failingRecordingEvaluator{}
+	report, err := (Runner{
+		Extractor: testGoExtractor(t),
+		Evaluator: evaluator,
+	}).Check(context.Background(), config.Config{Rules: []config.Rule{{
+		ID:          "names",
+		Description: "Use an overlay name.",
+		Severity:    config.SeverityError,
+		Localize:    []string{},
+	}}}, Options{
+		Root: root,
+		SourceOverlay: map[string][]byte{
+			"sample.go": []byte("package sample\n\nfunc OverlayName() {}\n"),
+		},
+	})
+	if err != nil {
+		t.Fatalf("Check() error = %v", err)
+	}
+	if len(evaluator.batches) != 1 ||
+		evaluator.batches[0].CodeUnit.Name != "OverlayName" {
+		t.Fatalf("Check() batches = %#v", evaluator.batches)
+	}
+	if len(report.SourcePaths) != 1 || report.SourcePaths[0] != "sample.go" {
+		t.Fatalf("Check() source paths = %#v", report.SourcePaths)
+	}
+	content, err := os.ReadFile(filepath.Join(root, "sample.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(content) != diskSource {
+		t.Fatalf("Check() modified disk source: %q", content)
+	}
+}
+
 func TestDiscoverFiltersDeduplicatesAndSortsFiles(t *testing.T) {
 	t.Parallel()
 

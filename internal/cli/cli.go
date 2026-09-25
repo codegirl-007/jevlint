@@ -10,15 +10,18 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"jevlint/internal/config"
 	"jevlint/internal/evaluation"
+	"jevlint/internal/fix"
 	"jevlint/internal/parsing"
 	"jevlint/internal/runner"
 )
 
 const usage = `Usage:
   jevlint check [flags] [paths...]
+  jevlint fix [flags] [paths...]
 
 Flags:
   --clear-cache         clear this project's cached evaluations before checking
@@ -35,12 +38,13 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		fmt.Fprint(stderr, usage)
 		return 2
 	}
-	if args[0] != "check" {
+	command := args[0]
+	if command != "check" && command != "fix" {
 		fmt.Fprintf(stderr, "jevlint: unknown command %q\n\n%s", args[0], usage)
 		return 2
 	}
 
-	flags := flag.NewFlagSet("check", flag.ContinueOnError)
+	flags := flag.NewFlagSet(command, flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	clearCache := flags.Bool("clear-cache", false, "clear cached evaluations")
 	color := flags.String("color", "auto", "color output")
@@ -130,6 +134,12 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		Extractor: extractor,
 		Evaluator: evaluator,
 	}
+	if command == "fix" {
+		newFixProgress(
+			stderr,
+			shouldUseColor(*color, stderr),
+		).status("checking for findings")
+	}
 	report, err := checker.Check(ctx, cfg, runner.Options{
 		Root:        projectRoot,
 		Paths:       flags.Args(),
@@ -140,20 +150,443 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 
-	switch *format {
-	case "json":
-		if err := writeJSON(stdout, report); err != nil {
-			fmt.Fprintf(stderr, "jevlint: write JSON output: %v\n", err)
-			return 2
-		}
-	case "text":
-		writeTextStyled(stdout, report, shouldUseColor(*color, stdout))
+	if command == "fix" {
+		return runFix(
+			ctx,
+			stdout,
+			stderr,
+			cfg,
+			absoluteConfig,
+			extractor,
+			report,
+			*concurrency,
+			*format,
+			*color,
+		)
+	}
+	if err := writeReport(stdout, report, *format, *color); err != nil {
+		fmt.Fprintf(stderr, "jevlint: write output: %v\n", err)
+		return 2
 	}
 
 	if report.HasFailures() {
 		return 1
 	}
 	return 0
+}
+
+type fixOutput struct {
+	Validated     bool             `json:"validated"`
+	ModifiedFiles []string         `json:"modifiedFiles"`
+	Findings      []runner.Finding `json:"findings"`
+	Diff          string           `json:"diff,omitempty"`
+}
+
+type rejectedFixError struct {
+	message string
+}
+
+func (fixError rejectedFixError) Error() string {
+	return fixError.message
+}
+
+func runFix(
+	ctx context.Context,
+	stdout io.Writer,
+	stderr io.Writer,
+	cfg config.Config,
+	configPath string,
+	extractor *parsing.Extractor,
+	report runner.Report,
+	concurrency int,
+	format string,
+	color string,
+) int {
+	if cfg.Fix == nil {
+		fmt.Fprintln(stderr, "jevlint: fix.command is required for the fix command")
+		return 2
+	}
+	if !report.HasFailures() {
+		if err := writeReport(stdout, report, format, color); err != nil {
+			fmt.Fprintf(stderr, "jevlint: write output: %v\n", err)
+			return 2
+		}
+		return 0
+	}
+
+	progress := newFixProgress(stderr, shouldUseColor(color, stderr))
+	proposal, err := prepareFixProposal(
+		ctx,
+		cfg,
+		configPath,
+		extractor,
+		report,
+		progress.status,
+		progress.agentMessage,
+		progress.toolActivity,
+	)
+	progress.finishAgentMessage()
+	if err != nil {
+		return reportFixPreparationError(stderr, err)
+	}
+	progress.status("validating proposed changes with Jev")
+	validation, err := validateFixProposal(
+		ctx,
+		cfg,
+		filepath.Dir(configPath),
+		extractor,
+		report.Findings,
+		proposal,
+		concurrency,
+	)
+	if err != nil {
+		fmt.Fprintf(stderr, "jevlint: validate fix: %v\n", err)
+		return 2
+	}
+	return finishFix(stdout, stderr, proposal, validation, format, color)
+}
+
+func prepareFixProposal(
+	ctx context.Context,
+	cfg config.Config,
+	configPath string,
+	extractor *parsing.Extractor,
+	report runner.Report,
+	progress func(string),
+	agentMessage func(string),
+	toolActivity func(string),
+) (fix.Proposal, error) {
+	proposal, err := fix.Generate(ctx, fix.Options{
+		Root:         filepath.Dir(configPath),
+		ConfigPath:   configPath,
+		Command:      cfg.Fix.Command,
+		Context:      cfg.Fix.Context,
+		Exclude:      cfg.Fix.Exclude,
+		Findings:     report.Findings,
+		Progress:     progress,
+		AgentMessage: agentMessage,
+		ToolActivity: toolActivity,
+	})
+	if err != nil {
+		return fix.Proposal{}, err
+	}
+	if len(proposal.Changes) == 0 {
+		return fix.Proposal{}, rejectedFixError{
+			message: "ACP agent made no source changes",
+		}
+	}
+	if err := fix.ValidateSyntax(extractor, proposal.Changes); err != nil {
+		return fix.Proposal{}, rejectedFixError{
+			message: "proposed fix has invalid syntax: " + err.Error(),
+		}
+	}
+	return proposal, nil
+}
+
+func reportFixPreparationError(stderr io.Writer, err error) int {
+	var rejection rejectedFixError
+	if errors.As(err, &rejection) {
+		fmt.Fprintf(stderr, "jevlint: %s\n", rejection.message)
+		return 1
+	}
+	fmt.Fprintf(stderr, "jevlint: generate fix: %v\n", err)
+	return 2
+}
+
+func validateFixProposal(
+	ctx context.Context,
+	cfg config.Config,
+	projectRoot string,
+	extractor *parsing.Extractor,
+	findings []runner.Finding,
+	proposal fix.Proposal,
+	concurrency int,
+) (runner.Report, error) {
+	overlay := make(map[string][]byte, len(proposal.Changes))
+	for _, change := range proposal.Changes {
+		overlay[change.Path] = change.After
+	}
+	validationEvaluator, err := evaluation.NewTypeSafeFromEnvWithOptions(
+		evaluation.TypeSafeOptions{},
+	)
+	if err != nil {
+		return runner.Report{}, fmt.Errorf(
+			"configure evaluator: %w",
+			err,
+		)
+	}
+	return (runner.Runner{
+		Extractor: extractor,
+		Evaluator: validationEvaluator,
+	}).Check(ctx, cfg, runner.Options{
+		Root:          projectRoot,
+		Paths:         findingPaths(findings),
+		Concurrency:   concurrency,
+		SourceOverlay: overlay,
+	})
+}
+
+func finishFix(
+	stdout io.Writer,
+	stderr io.Writer,
+	proposal fix.Proposal,
+	validation runner.Report,
+	format string,
+	color string,
+) int {
+	if validation.HasFailures() {
+		return writeRejectedFix(
+			stdout,
+			stderr,
+			proposal,
+			validation,
+			format,
+			color,
+		)
+	}
+	diff, err := fix.UnifiedDiff(proposal.Changes)
+	if err != nil {
+		fmt.Fprintf(stderr, "jevlint: render fix diff: %v\n", err)
+		return 2
+	}
+	if err := writeFixOutput(
+		stdout,
+		fixOutput{
+			Validated:     true,
+			ModifiedFiles: proposalPaths(proposal),
+			Diff:          diff,
+			Findings:      []runner.Finding{},
+		},
+		format,
+		color,
+	); err != nil {
+		fmt.Fprintf(stderr, "jevlint: write output: %v\n", err)
+		return 2
+	}
+	return 1
+}
+
+func writeRejectedFix(
+	stdout io.Writer,
+	stderr io.Writer,
+	proposal fix.Proposal,
+	validation runner.Report,
+	format string,
+	color string,
+) int {
+	diff, err := fix.UnifiedDiff(proposal.Changes)
+	if err != nil {
+		fmt.Fprintf(stderr, "jevlint: render rejected fix diff: %v\n", err)
+		return 2
+	}
+	if err := writeFixOutput(
+		stdout,
+		fixOutput{
+			ModifiedFiles: proposalPaths(proposal),
+			Findings:      validation.Findings,
+			Diff:          diff,
+		},
+		format,
+		color,
+	); err != nil {
+		fmt.Fprintf(stderr, "jevlint: write output: %v\n", err)
+		return 2
+	}
+	fmt.Fprintln(stderr, "jevlint: proposed fix did not resolve every finding")
+	return 1
+}
+
+func findingPaths(findings []runner.Finding) []string {
+	seen := make(map[string]struct{})
+	paths := make([]string, 0)
+	for _, finding := range findings {
+		if _, ok := seen[finding.Path]; ok {
+			continue
+		}
+		seen[finding.Path] = struct{}{}
+		paths = append(paths, finding.Path)
+	}
+	return paths
+}
+
+func proposalPaths(proposal fix.Proposal) []string {
+	paths := make([]string, 0, len(proposal.Changes))
+	for _, change := range proposal.Changes {
+		paths = append(paths, change.Path)
+	}
+	return paths
+}
+
+func writeFixOutput(
+	writer io.Writer,
+	output fixOutput,
+	format string,
+	color string,
+) error {
+	if format == "json" {
+		encoder := json.NewEncoder(writer)
+		encoder.SetIndent("", "  ")
+		return encoder.Encode(output)
+	}
+	style := outputStyle{color: shouldUseColor(color, writer)}
+	diff := highlightedFixDiff(output.Diff, style.color)
+	if !output.Validated {
+		fmt.Fprintf(
+			writer,
+			"\n  %s %s\n\n",
+			style.paint("1;33", "!"),
+			style.paint("1;33", "Proposed diff (rejected)"),
+		)
+		writeModifiedFiles(writer, style, output.ModifiedFiles)
+		fmt.Fprint(writer, diff)
+		if !strings.HasSuffix(diff, "\n") {
+			fmt.Fprintln(writer)
+		}
+		fmt.Fprintf(writer, "\n%s\n", style.paint("1", "Validation feedback"))
+		for _, finding := range output.Findings {
+			writeFinding(writer, style, finding)
+		}
+		writeSummary(writer, style, output.Findings)
+		return nil
+	}
+	fmt.Fprintf(
+		writer,
+		"\n  %s %s\n\n",
+		style.paint("1;32", "✓"),
+		style.paint("1;32", "Validated proposed diff"),
+	)
+	writeModifiedFiles(writer, style, output.ModifiedFiles)
+	_, err := fmt.Fprint(writer, diff)
+	return err
+}
+
+func writeModifiedFiles(writer io.Writer, style outputStyle, paths []string) {
+	fmt.Fprintln(writer, style.paint("1", "Modified files"))
+	for _, path := range paths {
+		fmt.Fprintf(
+			writer,
+			"  %s %s\n",
+			style.paint("33", "M"),
+			style.paint("36", path),
+		)
+	}
+	fmt.Fprintln(writer)
+}
+
+func writeReport(
+	writer io.Writer,
+	report runner.Report,
+	format string,
+	color string,
+) error {
+	if format == "json" {
+		return writeJSON(writer, report)
+	}
+	writeTextStyled(writer, report, shouldUseColor(color, writer))
+	return nil
+}
+
+type fixProgress struct {
+	writer         io.Writer
+	style          outputStyle
+	mu             sync.Mutex
+	agentActive    bool
+	agentLineStart bool
+}
+
+func newFixProgress(writer io.Writer, color bool) *fixProgress {
+	return &fixProgress{
+		writer: writer,
+		style:  outputStyle{color: color},
+	}
+}
+
+func (progress *fixProgress) status(message string) {
+	progress.mu.Lock()
+	defer progress.mu.Unlock()
+	progress.finishAgentMessageLocked()
+	fmt.Fprintf(
+		progress.writer,
+		"  %s %s\n",
+		progress.style.paint("36", "◆"),
+		progressLabel(message),
+	)
+}
+
+func (progress *fixProgress) toolActivity(message string) {
+	progress.mu.Lock()
+	defer progress.mu.Unlock()
+	progress.finishAgentMessageLocked()
+	fmt.Fprintf(
+		progress.writer,
+		"  %s %s\n",
+		progress.style.paint("36", "↳"),
+		message,
+	)
+}
+
+func (progress *fixProgress) agentMessage(message string) {
+	if message == "" {
+		return
+	}
+	progress.mu.Lock()
+	defer progress.mu.Unlock()
+	if !progress.agentActive {
+		fmt.Fprintf(
+			progress.writer,
+			"\n  %s\n",
+			progress.style.paint("1;35", "Agent"),
+		)
+		progress.agentActive = true
+		progress.agentLineStart = true
+	}
+	progress.writeAgentChunk(message)
+}
+
+func (progress *fixProgress) finishAgentMessage() {
+	progress.mu.Lock()
+	defer progress.mu.Unlock()
+	progress.finishAgentMessageLocked()
+}
+
+func (progress *fixProgress) finishAgentMessageLocked() {
+	if !progress.agentActive {
+		return
+	}
+	if !progress.agentLineStart {
+		fmt.Fprintln(progress.writer)
+	}
+	fmt.Fprintln(progress.writer)
+	progress.agentActive = false
+	progress.agentLineStart = false
+}
+
+func (progress *fixProgress) writeAgentChunk(message string) {
+	for message != "" {
+		if progress.agentLineStart {
+			fmt.Fprintf(
+				progress.writer,
+				"  %s ",
+				progress.style.paint("35", "│"),
+			)
+			progress.agentLineStart = false
+		}
+		newline := strings.IndexByte(message, '\n')
+		if newline < 0 {
+			fmt.Fprint(progress.writer, message)
+			return
+		}
+		fmt.Fprintln(progress.writer, message[:newline])
+		progress.agentLineStart = true
+		message = message[newline+1:]
+	}
+}
+
+func progressLabel(message string) string {
+	if message == "" {
+		return ""
+	}
+	return strings.ToUpper(message[:1]) + message[1:]
 }
 
 func writeJSON(writer io.Writer, report runner.Report) error {

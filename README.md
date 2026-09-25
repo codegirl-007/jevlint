@@ -1,7 +1,7 @@
 # Jevlint
 
 Jevlint checks code against plain-language rules. It uses Tree-sitter to extract
-functions and types, then asks Jev whether each one passes.
+code units, then asks Jev whether each one passes.
 
 ## Requirements
 
@@ -19,6 +19,7 @@ go run ./cmd/jevlint check .
 go run ./cmd/jevlint check --format json src
 go run ./cmd/jevlint check --concurrency 8 src
 go run ./cmd/jevlint check --refresh-cache .
+go run ./cmd/jevlint fix .
 ```
 
 Flags must appear before source paths.
@@ -45,6 +46,10 @@ Jevlint reads `jevlint.json` by default.
 
 ```json
 {
+  "fix": {
+    "command": ["gemini", "--acp"],
+    "exclude": ["examples/**"]
+  },
   "languages": {
     "go": {},
     "typescript": {},
@@ -103,6 +108,59 @@ customize a preset, but it cannot load an arbitrary external grammar.
 
 Jevlint sends extracted source code and file metadata to TypeSafe.
 
+## Autofix preview
+
+`jevlint fix` asks a pre-authenticated ACP agent to fix current findings and
+prints a validated diff. It does not modify project files.
+Progress is written to stderr while the final diff or JSON is written to stdout.
+
+Configure any ACP agent command:
+
+```json
+{
+  "fix": {
+    "command": ["claude-agent-acp"]
+  }
+}
+```
+
+By default, the temporary workspace contains the safe, non-ignored project
+tree. Use `fix.context` to narrow that read-only context and `fix.exclude` for
+additional project-specific exclusions:
+
+```json
+{
+  "fix": {
+    "command": ["agent", "acp"],
+    "context": ["src/**", "tests/**", "go.mod", "go.sum"],
+    "exclude": ["src/generated/**"]
+  }
+}
+```
+
+Common choices are
+[Claude Agent ACP](https://github.com/agentclientprotocol/claude-agent-acp),
+[Codex ACP](https://github.com/agentclientprotocol/codex-acp), and Gemini CLI
+with `["gemini", "--acp"]`.
+
+Jevlint mirrors regular project files into a temporary directory, respecting
+nested `.gitignore` files. It always excludes version-control metadata,
+dependency and build directories, symlinks, special files, and common secret
+files such as `.env`, private keys, and package-manager credentials. Finding
+files and `jevlint.json` remain available when `fix.context` narrows the
+snapshot.
+
+The agent can read mirrored files, but it may edit only files with findings.
+After the session, Jevlint rejects created, deleted, replaced, or unauthorized
+modified files. Proposed source must parse and pass Jev validation before its
+diff is shown. Candidate evaluations are not cached. The ACP client does not
+provide terminal access, though the configured agent executable may have its
+own local tools for targeted formatting and tests.
+
+The configured agent is an external process and may send mirrored source to its
+model provider. The temporary workspace is not an operating-system sandbox; the
+command still runs as your user. Use only agents and providers you trust.
+
 ## Cache
 
 Jevlint caches validated results in the operating system's user cache directory.
@@ -145,7 +203,7 @@ before a run.
 - Type context is limited to the same file.
 - Database provenance and cross-function data flow are not traced.
 - Jev returns a constrained choice, not a free-form explanation.
-- There is no autofix.
+- Autofix is dry-run only and cannot create, delete, or rename files.
 
 ## Exit codes
 

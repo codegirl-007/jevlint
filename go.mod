@@ -5,6 +5,9 @@ go 1.26
 require (
 	github.com/alecthomas/chroma/v2 v2.27.0
 	github.com/bmatcuk/doublestar/v4 v4.9.1
+	github.com/coder/acp-go-sdk v0.13.5
+	github.com/pmezard/go-difflib v1.0.0
+	github.com/sabhiram/go-gitignore v0.0.0-20210923224102-525f6e181f06
 	github.com/tree-sitter-grammars/tree-sitter-kotlin v1.1.0
 	github.com/tree-sitter/go-tree-sitter v0.25.0
 	github.com/tree-sitter/tree-sitter-c v0.24.1
@@ -23,4 +26,5 @@ require (
 require (
 	github.com/dlclark/regexp2/v2 v2.2.1 // indirect
 	github.com/mattn/go-pointer v0.0.1 // indirect
+	github.com/stretchr/testify v1.11.1 // indirect
 )

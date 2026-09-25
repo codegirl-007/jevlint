@@ -1,4 +1,7 @@
 {
+  "fix": {
+    "command": ["agent", "acp"]
+  },
   "languages": {
     "c": {},
     "cpp": {},

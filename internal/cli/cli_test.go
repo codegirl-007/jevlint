@@ -81,6 +81,126 @@ func JoinInCode() {
 	}
 }
 
+func TestRunFixRequiresConfiguredACPCommand(t *testing.T) {
+	root := writeProject(t, "package sample\n\nfunc JoinInCode() {}\n")
+	server := httptest.NewServer(http.HandlerFunc(
+		func(writer http.ResponseWriter, _ *http.Request) {
+			writer.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(writer, `{
+				"model": "jev-test",
+				"answers": {
+					"database-joins": {
+						"type": "choice",
+						"choice": "fail",
+						"confidence": 1
+					}
+				}
+			}`)
+		},
+	))
+	defer server.Close()
+	t.Setenv("TYPESAFE_API_KEY", "sk-test")
+	t.Setenv("TYPESAFE_BASE_URL", server.URL)
+	t.Setenv("TYPESAFE_DEFAULT_MODEL", "jev-test")
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+
+	var stdout, stderr bytes.Buffer
+	exitCode := Run(
+		context.Background(),
+		[]string{"fix", "--config", filepath.Join(root, "jevlint.json"), "."},
+		&stdout,
+		&stderr,
+	)
+	if exitCode != 2 {
+		t.Fatalf(
+			"Run() exit code = %d, want 2; stderr = %q",
+			exitCode,
+			stderr.String(),
+		)
+	}
+	if !strings.Contains(stderr.String(), "fix.command is required") {
+		t.Fatalf("stderr = %q", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "Checking for findings") {
+		t.Fatalf("stderr lacks progress: %q", stderr.String())
+	}
+}
+
+func TestWriteFixOutputIncludesRejectedProposal(t *testing.T) {
+	t.Parallel()
+
+	output := fixOutput{
+		ModifiedFiles: []string{"sample.go"},
+		Diff:          "--- a/sample.go\n+++ b/sample.go\n@@ -1 +1 @@\n-func Old() {}\n+func New() {}\n",
+		Findings: []runner.Finding{{
+			RuleID:      "short-functions",
+			Description: "Functions must not exceed seven lines.",
+			Severity:    config.SeverityWarning,
+			Status:      evaluation.StatusFail,
+			Path:        "sample.go",
+			Kind:        parsing.CodeKindFunction,
+			Name:        "New",
+			StartLine:   1,
+			EndLine:     1,
+			Snippet:     "func New() {}",
+		}},
+	}
+
+	var text bytes.Buffer
+	if err := writeFixOutput(&text, output, "text", "never"); err != nil {
+		t.Fatalf("write text fix output: %v", err)
+	}
+	for _, expected := range []string{
+		"Proposed diff (rejected)",
+		"Modified files",
+		"M sample.go",
+		"+func New() {}",
+		"Validation feedback",
+		"short-functions",
+		"Summary",
+	} {
+		if !strings.Contains(text.String(), expected) {
+			t.Fatalf("text output = %q, want %q", text.String(), expected)
+		}
+	}
+	if strings.Contains(text.String(), "0 files") {
+		t.Fatalf("text output includes synthetic scan totals: %q", text.String())
+	}
+
+	validated := output
+	validated.Validated = true
+	validated.Findings = nil
+	var accepted bytes.Buffer
+	if err := writeFixOutput(&accepted, validated, "text", "never"); err != nil {
+		t.Fatalf("write accepted text fix output: %v", err)
+	}
+	for _, expected := range []string{
+		"Validated proposed diff",
+		"Modified files",
+		"M sample.go",
+		"+func New() {}",
+	} {
+		if !strings.Contains(accepted.String(), expected) {
+			t.Fatalf("accepted output = %q, want %q", accepted.String(), expected)
+		}
+	}
+
+	var encoded bytes.Buffer
+	if err := writeFixOutput(&encoded, output, "json", "never"); err != nil {
+		t.Fatalf("write JSON fix output: %v", err)
+	}
+	var decoded fixOutput
+	if err := json.Unmarshal(encoded.Bytes(), &decoded); err != nil {
+		t.Fatalf("decode JSON fix output: %v", err)
+	}
+	if decoded.Diff != output.Diff ||
+		decoded.Validated ||
+		len(decoded.ModifiedFiles) != 1 ||
+		decoded.ModifiedFiles[0] != "sample.go" {
+		t.Fatalf("decoded output = %#v", decoded)
+	}
+}
+
 func TestWriteTextHighlightsRuleAndSnippet(t *testing.T) {
 	t.Parallel()
 
@@ -141,6 +261,28 @@ func TestWriteTextHighlightsRuleAndSnippet(t *testing.T) {
 		"\x1b[1;31mJoin records in the database.\x1b[0m",
 	) {
 		t.Fatalf("colored output does not highlight description: %q", colored.String())
+	}
+}
+
+func TestFixProgressStreamsAgentMessageChunks(t *testing.T) {
+	t.Parallel()
+
+	var output bytes.Buffer
+	progress := newFixProgress(&output, false)
+	progress.status("starting ACP agent")
+	progress.toolActivity("Reading internal/cli/cli.go")
+	progress.agentMessage("Changing ")
+	progress.agentMessage("the function.")
+	progress.status("validating proposed changes with Jev")
+
+	want := "  ◆ Starting ACP agent\n" +
+		"  ↳ Reading internal/cli/cli.go\n" +
+		"\n  Agent\n" +
+		"  │ Changing the function.\n" +
+		"\n" +
+		"  ◆ Validating proposed changes with Jev\n"
+	if output.String() != want {
+		t.Fatalf("progress output = %q, want %q", output.String(), want)
 	}
 }
 

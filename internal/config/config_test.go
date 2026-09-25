@@ -9,6 +9,11 @@ func TestDecodeValidConfig(t *testing.T) {
 	t.Parallel()
 
 	cfg, err := Decode(strings.NewReader(withGoLanguage(`{
+		"fix": {
+			"command": ["gemini", "--acp"],
+			"context": ["src/**", "go.mod"],
+			"exclude": ["src/generated/**"]
+		},
 		"rules": [{
 			"id": "database-joins",
 			"description": "Join related database records in the database.",
@@ -23,6 +28,13 @@ func TestDecodeValidConfig(t *testing.T) {
 	}
 	if len(cfg.Rules) != 1 || cfg.Rules[0].ID != "database-joins" {
 		t.Fatalf("Decode() rules = %#v", cfg.Rules)
+	}
+	if cfg.Fix == nil ||
+		len(cfg.Fix.Command) != 2 ||
+		cfg.Fix.Command[0] != "gemini" ||
+		len(cfg.Fix.Context) != 2 ||
+		len(cfg.Fix.Exclude) != 1 {
+		t.Fatalf("Decode() fix = %#v", cfg.Fix)
 	}
 }
 
@@ -86,6 +98,34 @@ func TestDecodeValidationErrors(t *testing.T) {
 		"empty rules": {
 			input: `{"rules": []}`,
 			want:  "config must contain at least one rule",
+		},
+		"empty fix command": {
+			input: `{
+				"fix": {"command": []},
+				"rules": [{"id": "one", "description": "A rule.", "severity": "info"}]
+			}`,
+			want: "fix.command must contain an ACP agent executable",
+		},
+		"blank fix argument": {
+			input: `{
+				"fix": {"command": ["agent", " "]},
+				"rules": [{"id": "one", "description": "A rule.", "severity": "info"}]
+			}`,
+			want: "fix.command contains an empty argument",
+		},
+		"empty fix context pattern": {
+			input: `{
+				"fix": {"command": ["agent"], "context": [" "]},
+				"rules": [{"id": "one", "description": "A rule.", "severity": "info"}]
+			}`,
+			want: "fix.context contains an empty pattern",
+		},
+		"invalid fix exclude pattern": {
+			input: `{
+				"fix": {"command": ["agent"], "exclude": ["["]},
+				"rules": [{"id": "one", "description": "A rule.", "severity": "info"}]
+			}`,
+			want: `fix.exclude contains invalid pattern "["`,
 		},
 		"missing id takes precedence": {
 			input: `{"rules": [{

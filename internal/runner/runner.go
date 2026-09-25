@@ -21,9 +21,10 @@ type Runner struct {
 }
 
 type Options struct {
-	Root        string
-	Paths       []string
-	Concurrency int
+	Root          string
+	Paths         []string
+	Concurrency   int
+	SourceOverlay map[string][]byte
 }
 
 type Report struct {
@@ -32,6 +33,7 @@ type Report struct {
 	Evaluations  int                    `json:"evaluations"`
 	Cache        *evaluation.CacheStats `json:"cache,omitempty"`
 	Findings     []Finding              `json:"findings"`
+	SourcePaths  []string               `json:"-"`
 }
 
 type Finding struct {
@@ -90,9 +92,10 @@ type localizationOutcome struct {
 }
 
 type checkSetup struct {
-	root        string
-	paths       []string
-	concurrency int
+	root          string
+	paths         []string
+	concurrency   int
+	sourceOverlay map[string][]byte
 }
 
 func (runner Runner) Check(ctx context.Context, cfg config.Config, options Options) (Report, error) {
@@ -105,7 +108,13 @@ func (runner Runner) Check(ctx context.Context, cfg config.Config, options Optio
 	if err != nil {
 		return Report{}, err
 	}
-	report, jobs, err := runner.planEvaluations(ctx, cfg, setup.root, files)
+	report, jobs, err := runner.planEvaluations(
+		ctx,
+		cfg,
+		setup.root,
+		files,
+		setup.sourceOverlay,
+	)
 	if err != nil {
 		return Report{}, err
 	}
@@ -177,7 +186,12 @@ func (runner Runner) prepareCheck(options Options) (checkSetup, error) {
 	if len(paths) == 0 {
 		paths = []string{"."}
 	}
-	return checkSetup{root: root, paths: paths, concurrency: concurrency}, nil
+	return checkSetup{
+		root:          root,
+		paths:         paths,
+		concurrency:   concurrency,
+		sourceOverlay: options.SourceOverlay,
+	}, nil
 }
 
 func (runner Runner) planEvaluations(
@@ -185,6 +199,7 @@ func (runner Runner) planEvaluations(
 	cfg config.Config,
 	root string,
 	files []string,
+	sourceOverlay map[string][]byte,
 ) (Report, []evaluationJob, error) {
 	report := Report{Findings: make([]Finding, 0)}
 	jobs := make([]evaluationJob, 0)
@@ -192,12 +207,29 @@ func (runner Runner) planEvaluations(
 		if err := ctx.Err(); err != nil {
 			return Report{}, nil, err
 		}
-		fileJobs, codeUnits, scanned, err := runner.planFile(cfg, root, file)
+		fileJobs, codeUnits, scanned, err := runner.planFile(
+			cfg,
+			root,
+			file,
+			sourceOverlay,
+		)
 		if err != nil {
 			return Report{}, nil, err
 		}
 		if scanned {
 			report.ScannedFiles++
+			relative, relErr := filepath.Rel(root, file)
+			if relErr != nil {
+				return Report{}, nil, fmt.Errorf(
+					"make %q relative to project root: %w",
+					file,
+					relErr,
+				)
+			}
+			report.SourcePaths = append(
+				report.SourcePaths,
+				filepath.ToSlash(relative),
+			)
 		}
 		report.CodeUnits += codeUnits
 		jobs = append(jobs, fileJobs...)
@@ -209,6 +241,7 @@ func (runner Runner) planFile(
 	cfg config.Config,
 	root string,
 	file string,
+	sourceOverlay map[string][]byte,
 ) ([]evaluationJob, int, bool, error) {
 	relative, err := filepath.Rel(root, file)
 	if err != nil {
@@ -223,9 +256,12 @@ func (runner Runner) planFile(
 	if err != nil || len(applicable) == 0 {
 		return nil, 0, false, err
 	}
-	source, err := os.ReadFile(file)
-	if err != nil {
-		return nil, 0, false, fmt.Errorf("read %q: %w", relative, err)
+	source, ok := sourceOverlay[relative]
+	if !ok {
+		source, err = os.ReadFile(file)
+		if err != nil {
+			return nil, 0, false, fmt.Errorf("read %q: %w", relative, err)
+		}
 	}
 	units, err := runner.Extractor.Extract(relative, source)
 	if err != nil {
