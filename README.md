@@ -115,8 +115,8 @@ writes a validated proposal to the project. `jevlint check --fix` prints the
 findings first, then does the same. Writes happen only after Jev validation
 succeeds and the files on disk still match the snapshot used to generate the
 proposal. Rejected proposals are never written.
-The agent can call `jevlint_check` during the session to verify its work
-before it finishes. Progress is written to stderr while the final diff or
+The agent is told to call `jevlint_check` and not finish until that check
+reports no findings. Progress is written to stderr while the final diff or
 JSON is written to stdout.
 
 Configure any ACP agent command:
@@ -156,8 +156,9 @@ files and `jevlint.json` remain available when `fix.context` narrows the
 snapshot.
 
 The session includes a `jevlint_check` MCP tool so the agent can re-run Jevlint
-on the snapshot before it finishes. The tool only checks; it cannot apply
-fixes or use the cache. Terminals stay disabled.
+on the snapshot. It must keep fixing until that check reports no findings.
+The tool only checks; it cannot apply fixes or use the cache. Terminals stay
+disabled.
 
 The agent can read mirrored files, but it may edit only files with findings.
 After the session, Jevlint rejects created, deleted, replaced, or unauthorized

@@ -102,7 +102,8 @@ func handleMCPRequest(ctx context.Context, request mcpRequest) ([]byte, error) {
 			"tools": []map[string]any{{
 				"name": checkToolName,
 				"description": "Run Jevlint check on the current workspace. " +
-					"Does not apply fixes. Call this before finishing an autofix.",
+					"Does not apply fixes. You must call this and get no findings " +
+					"before finishing an autofix.",
 				"inputSchema": map[string]any{
 					"type":       "object",
 					"properties": map[string]any{},

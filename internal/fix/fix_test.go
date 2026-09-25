@@ -156,7 +156,8 @@ func TestBuildPromptDescribesSnapshotAndTargetedChecks(t *testing.T) {
 		"safe project snapshot",
 		"only edit files listed in the findings",
 		"targeted formatters, type checks, or tests",
-		"Jevlint will perform final validation",
+		"call jevlint_check",
+		"Do not finish until jevlint_check reports no findings",
 	} {
 		if !strings.Contains(prompt, expected) {
 			t.Fatalf("buildPrompt() = %q, want %q", prompt, expected)

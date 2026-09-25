@@ -315,8 +315,10 @@ func buildPrompt(findings []runner.Finding) string {
 			"files. Keep behavior unchanged except where required by the rules. Run " +
 			"targeted formatters, type checks, or tests when their dependencies are " +
 			"available; unavailable project services or dependencies are not a reason " +
-			"to broaden the change. Jevlint will perform final validation. Finish " +
-			"after making the edits.\n",
+			"to broaden the change. After edits, call jevlint_check. Do not finish " +
+			"until jevlint_check reports no findings. If it still reports findings, " +
+			"keep fixing those files and check again. Jevlint will also perform a " +
+			"final validation after you stop.\n",
 	)
 	for _, finding := range findings {
 		fmt.Fprintf(
