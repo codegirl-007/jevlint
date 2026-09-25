@@ -23,12 +23,21 @@ go run ./cmd/jevlint check --refresh-cache .
 
 Flags must appear before source paths.
 
+| Flag | Description |
+| --- | --- |
+| `--clear-cache` | Clear this project's cached evaluations before checking. New results are cached. |
+| `--color auto\|always\|never` | Control colored text output. Defaults to `auto`. |
+| `--config path` | Use a different rule file. Its directory becomes the project root. |
+| `--concurrency number` | Set the maximum number of concurrent Jev requests. Defaults to `4`. |
+| `--format text\|json` | Select human-readable or machine-readable output. Defaults to `text`. |
+| `--no-cache` | Bypass cache reads and writes for this run. |
+| `--refresh-cache` | Reevaluate code and replace matching cached results. |
+
 ```sh
 go build -o jevlint ./cmd/jevlint
 ```
 
-Use `--color always` or `--color never` to control colored output. Set
-`TYPESAFE_BASE_URL` or `TYPESAFE_DEFAULT_MODEL` to override the API defaults.
+Set `TYPESAFE_BASE_URL` or `TYPESAFE_DEFAULT_MODEL` to override the API defaults.
 
 ## Rules
 
