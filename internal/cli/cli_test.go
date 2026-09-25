@@ -126,6 +126,53 @@ func TestRunFixRequiresConfiguredACPCommand(t *testing.T) {
 	}
 }
 
+func TestRunCheckFixAcceptsFlag(t *testing.T) {
+	root := writeProject(t, `
+package sample
+
+func JoinInCode() {
+	println("join")
+}
+`)
+	server := httptest.NewServer(http.HandlerFunc(
+		func(writer http.ResponseWriter, _ *http.Request) {
+			writer.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(writer, `{
+				"model": "jev-test",
+				"answers": {
+					"database-joins": {
+						"type": "choice",
+						"choice": "fail",
+						"confidence": 1
+					}
+				}
+			}`)
+		},
+	))
+	defer server.Close()
+	t.Setenv("TYPESAFE_API_KEY", "sk-test")
+	t.Setenv("TYPESAFE_BASE_URL", server.URL)
+	t.Setenv("TYPESAFE_DEFAULT_MODEL", "jev-test")
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+
+	var stdout, stderr bytes.Buffer
+	exitCode := Run(
+		context.Background(),
+		[]string{"check", "--clear-cache", "--fix", "--config", filepath.Join(root, "jevlint.json"), "."},
+		&stdout,
+		&stderr,
+	)
+	if strings.Contains(stderr.String(), "flag provided but not defined") {
+		t.Fatalf("stderr = %q", stderr.String())
+	}
+	if exitCode != 2 {
+		t.Fatalf("Run() exit code = %d, want 2; stderr = %q", exitCode, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "database-joins") {
+		t.Fatalf("stdout missing findings: %q", stdout.String())
+	}
+}
+
 func TestWriteFixOutputIncludesRejectedProposal(t *testing.T) {
 	t.Parallel()
 

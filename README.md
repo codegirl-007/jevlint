@@ -20,9 +20,8 @@ go run ./cmd/jevlint check --format json src
 go run ./cmd/jevlint check --concurrency 8 src
 go run ./cmd/jevlint check --refresh-cache .
 go run ./cmd/jevlint fix .
+go run ./cmd/jevlint check --fix .
 ```
-
-Flags must appear before source paths.
 
 | Flag | Description |
 | --- | --- |
@@ -33,6 +32,7 @@ Flags must appear before source paths.
 | `--format text\|json` | Select human-readable or machine-readable output. Defaults to `text`. |
 | `--no-cache` | Bypass cache reads and writes for this run. |
 | `--refresh-cache` | Reevaluate code and replace matching cached results. |
+| `--fix` | Print current findings, then apply a validated proposal. Bypasses the cache. |
 
 ```sh
 go build -o jevlint ./cmd/jevlint
@@ -108,11 +108,16 @@ customize a preset, but it cannot load an arbitrary external grammar.
 
 Jevlint sends extracted source code and file metadata to TypeSafe.
 
-## Autofix preview
+## Autofix
 
 `jevlint fix` asks a pre-authenticated ACP agent to fix current findings and
-prints a validated diff. It does not modify project files.
-Progress is written to stderr while the final diff or JSON is written to stdout.
+writes a validated proposal to the project. `jevlint check --fix` prints the
+findings first, then does the same. Writes happen only after Jev validation
+succeeds and the files on disk still match the snapshot used to generate the
+proposal. Rejected proposals are never written.
+The agent can call `jevlint_check` during the session to verify its work
+before it finishes. Progress is written to stderr while the final diff or
+JSON is written to stdout.
 
 Configure any ACP agent command:
 
@@ -150,6 +155,10 @@ files such as `.env`, private keys, and package-manager credentials. Finding
 files and `jevlint.json` remain available when `fix.context` narrows the
 snapshot.
 
+The session includes a `jevlint_check` MCP tool so the agent can re-run Jevlint
+on the snapshot before it finishes. The tool only checks; it cannot apply
+fixes or use the cache. Terminals stay disabled.
+
 The agent can read mirrored files, but it may edit only files with findings.
 After the session, Jevlint rejects created, deleted, replaced, or unauthorized
 modified files. Proposed source must parse and pass Jev validation before its
@@ -175,7 +184,7 @@ affects reporting.
 Entries do not expire automatically. Because `jev-latest` can change without
 changing its name, use `--refresh-cache` for fresh model behavior. Use
 `--no-cache` to bypass caching or `--clear-cache` to clear this project's cache
-before a run.
+before a run. `--fix` also bypasses the cache.
 
 ## Supported languages
 
@@ -203,12 +212,13 @@ before a run.
 - Type context is limited to the same file.
 - Database provenance and cross-function data flow are not traced.
 - Jev returns a constrained choice, not a free-form explanation.
-- Autofix is dry-run only and cannot create, delete, or rename files.
+- Autofix cannot create, delete, or rename files.
+- `fix` and `--fix` write only validated edits to existing finding files.
 
 ## Exit codes
 
-- `0`: no findings
-- `1`: findings
+- `0`: no findings, or a validated fix was applied
+- `1`: findings remain, or a proposed fix was rejected
 - `2`: configuration or runtime error
 
 ## Verify

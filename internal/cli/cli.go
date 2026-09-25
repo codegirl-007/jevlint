@@ -31,6 +31,7 @@ Flags:
   --format text|json    output format (default "text")
   --no-cache            bypass evaluation cache reads and writes
   --refresh-cache       reevaluate and replace current cached results
+  --fix                 print findings, then apply a validated fix
 `
 
 func Run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
@@ -39,6 +40,17 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 	command := args[0]
+	if command == "mcp-check" {
+		if err := fix.ServeCheck(ctx, os.Stdin, stdout); err != nil {
+			fmt.Fprintf(stderr, "jevlint: mcp-check: %v\n", err)
+			return 2
+		}
+		return 0
+	}
+	if command == "-h" || command == "--help" {
+		fmt.Fprint(stderr, usage)
+		return 0
+	}
 	if command != "check" && command != "fix" {
 		fmt.Fprintf(stderr, "jevlint: unknown command %q\n\n%s", args[0], usage)
 		return 2
@@ -53,10 +65,16 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	format := flags.String("format", "text", "output format")
 	noCache := flags.Bool("no-cache", false, "bypass evaluation cache")
 	refreshCache := flags.Bool("refresh-cache", false, "refresh cached evaluations")
+	autoFix := flags.Bool("fix", false, "print findings and apply a validated fix")
 	flags.Usage = func() {
 		fmt.Fprint(stderr, usage)
 	}
-	if err := flags.Parse(args[1:]); err != nil {
+	flagArgs, paths, err := splitFlagsAndPaths(flags, args[1:])
+	if err != nil {
+		fmt.Fprintf(stderr, "jevlint: %v\n", err)
+		return 2
+	}
+	if err := flags.Parse(flagArgs); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return 0
 		}
@@ -74,8 +92,13 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "jevlint: --concurrency must be at least 1")
 		return 2
 	}
-	if *noCache && *refreshCache {
-		fmt.Fprintln(stderr, "jevlint: --no-cache and --refresh-cache cannot be combined")
+	bypassCache := *noCache || *autoFix
+	if bypassCache && *refreshCache {
+		if *autoFix && !*noCache {
+			fmt.Fprintln(stderr, "jevlint: --fix and --refresh-cache cannot be combined")
+		} else {
+			fmt.Fprintln(stderr, "jevlint: --no-cache and --refresh-cache cannot be combined")
+		}
 		return 2
 	}
 
@@ -98,7 +121,7 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 
 	projectRoot := filepath.Dir(absoluteConfig)
 	var resultCache evaluation.ResultCache
-	if !*noCache || *clearCache {
+	if !bypassCache || *clearCache {
 		cache, cacheErr := evaluation.NewFileCache(projectRoot)
 		if cacheErr != nil {
 			if *clearCache {
@@ -113,7 +136,7 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 					return 2
 				}
 			}
-			if !*noCache {
+			if !bypassCache {
 				resultCache = cache
 			}
 		}
@@ -122,7 +145,7 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	evaluator, err := evaluation.NewTypeSafeFromEnvWithOptions(
 		evaluation.TypeSafeOptions{
 			Cache:   resultCache,
-			Refresh: *refreshCache,
+			Refresh: *refreshCache && !bypassCache,
 		},
 	)
 	if err != nil {
@@ -134,7 +157,7 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		Extractor: extractor,
 		Evaluator: evaluator,
 	}
-	if command == "fix" {
+	if command == "fix" || *autoFix {
 		newFixProgress(
 			stderr,
 			shouldUseColor(*color, stderr),
@@ -142,7 +165,7 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	}
 	report, err := checker.Check(ctx, cfg, runner.Options{
 		Root:        projectRoot,
-		Paths:       flags.Args(),
+		Paths:       paths,
 		Concurrency: *concurrency,
 	})
 	if err != nil {
@@ -150,6 +173,29 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 
+	if *autoFix {
+		if *format == "text" || !report.HasFailures() {
+			if err := writeReport(stdout, report, *format, *color); err != nil {
+				fmt.Fprintf(stderr, "jevlint: write output: %v\n", err)
+				return 2
+			}
+		}
+		if !report.HasFailures() {
+			return 0
+		}
+		return runFix(
+			ctx,
+			stdout,
+			stderr,
+			cfg,
+			absoluteConfig,
+			extractor,
+			report,
+			*concurrency,
+			*format,
+			*color,
+		)
+	}
 	if command == "fix" {
 		return runFix(
 			ctx,
@@ -177,6 +223,7 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 
 type fixOutput struct {
 	Validated     bool             `json:"validated"`
+	Applied       bool             `json:"applied"`
 	ModifiedFiles []string         `json:"modifiedFiles"`
 	Findings      []runner.Finding `json:"findings"`
 	Diff          string           `json:"diff,omitempty"`
@@ -243,7 +290,15 @@ func runFix(
 		fmt.Fprintf(stderr, "jevlint: validate fix: %v\n", err)
 		return 2
 	}
-	return finishFix(stdout, stderr, proposal, validation, format, color)
+	return finishFix(
+		stdout,
+		stderr,
+		proposal,
+		validation,
+		format,
+		color,
+		filepath.Dir(configPath),
+	)
 }
 
 func prepareFixProposal(
@@ -333,6 +388,7 @@ func finishFix(
 	validation runner.Report,
 	format string,
 	color string,
+	projectRoot string,
 ) int {
 	if validation.HasFailures() {
 		return writeRejectedFix(
@@ -344,6 +400,10 @@ func finishFix(
 			color,
 		)
 	}
+	if err := fix.Apply(projectRoot, proposal.Changes); err != nil {
+		fmt.Fprintf(stderr, "jevlint: apply fix: %v\n", err)
+		return 2
+	}
 	diff, err := fix.UnifiedDiff(proposal.Changes)
 	if err != nil {
 		fmt.Fprintf(stderr, "jevlint: render fix diff: %v\n", err)
@@ -353,6 +413,7 @@ func finishFix(
 		stdout,
 		fixOutput{
 			Validated:     true,
+			Applied:       true,
 			ModifiedFiles: proposalPaths(proposal),
 			Diff:          diff,
 			Findings:      []runner.Finding{},
@@ -363,7 +424,7 @@ func finishFix(
 		fmt.Fprintf(stderr, "jevlint: write output: %v\n", err)
 		return 2
 	}
-	return 1
+	return 0
 }
 
 func writeRejectedFix(
@@ -449,11 +510,15 @@ func writeFixOutput(
 		writeSummary(writer, style, output.Findings)
 		return nil
 	}
+	heading := "Validated proposed diff"
+	if output.Applied {
+		heading = "Applied proposed diff"
+	}
 	fmt.Fprintf(
 		writer,
 		"\n  %s %s\n\n",
 		style.paint("1;32", "✓"),
-		style.paint("1;32", "Validated proposed diff"),
+		style.paint("1;32", heading),
 	)
 	writeModifiedFiles(writer, style, output.ModifiedFiles)
 	_, err := fmt.Fprint(writer, diff)
@@ -783,4 +848,44 @@ func wrapText(text string, width int) []string {
 		line += word
 	}
 	return append(lines, line)
+}
+
+func splitFlagsAndPaths(set *flag.FlagSet, args []string) ([]string, []string, error) {
+	flagArgs := make([]string, 0, len(args))
+	paths := make([]string, 0)
+	for index := 0; index < len(args); index++ {
+		arg := args[index]
+		if arg == "--" {
+			paths = append(paths, args[index+1:]...)
+			break
+		}
+		if arg == "-" || !strings.HasPrefix(arg, "-") {
+			paths = append(paths, arg)
+			continue
+		}
+		name := strings.TrimLeft(arg, "-")
+		inline := strings.Contains(name, "=")
+		if inline {
+			name, _, _ = strings.Cut(name, "=")
+		}
+		flagArgs = append(flagArgs, arg)
+		if inline || name == "h" || name == "help" {
+			continue
+		}
+		defined := set.Lookup(name)
+		if defined == nil || isBoolFlag(defined.Value) {
+			continue
+		}
+		if index+1 >= len(args) {
+			return nil, nil, fmt.Errorf("flag needs an argument: -%s", name)
+		}
+		index++
+		flagArgs = append(flagArgs, args[index])
+	}
+	return flagArgs, paths, nil
+}
+
+func isBoolFlag(value flag.Value) bool {
+	flag, ok := value.(interface{ IsBoolFlag() bool })
+	return ok && flag.IsBoolFlag()
 }
