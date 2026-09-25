@@ -1,6 +1,6 @@
 package good
 
 type FeatureFlags struct {
-	IsEnabled  bool
-	ShouldSync bool
+	Enabled bool
+	CanSync bool
 }

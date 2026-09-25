@@ -2,7 +2,7 @@
   "rules": [
     {
       "id": "database-joins",
-      "description": "When related records come from the same database, combine them in the database query rather than matching, merging, or enriching them in application code.",
+      "description": "Fail only when the code clearly retrieves related records from the same database and joins, matches, merges, or enriches them in application code instead of in the query. If database-backed records cannot be established from the supplied code, pass. AST processing, parsing, and general in-memory collection operations pass.",
       "severity": "error",
       "kinds": ["function"],
       "include": [
@@ -39,8 +39,8 @@
       "localize": ["statement"]
     },
     {
-      "id": "boolean-property-prefix",
-      "description": "Every boolean property or field in a type declaration must have a name beginning with Is or Should.",
+      "id": "boolean-property-naming",
+      "description": "Boolean property and field names should make the true state clear while following the language's conventions. Predicate prefixes such as Is, Has, Can, or Should and positive state names such as Enabled, Ready, or Visible pass. Concise domain names also pass when the containing type makes their meaning unambiguous, such as color on outputStyle. Fail vague names such as Flag, Value, or Data, misleading names, and negative names that create double negatives. Do not require an Is or Should prefix.",
       "severity": "error",
       "kinds": ["type"],
       "include": [
@@ -107,7 +107,7 @@
       "localize": ["comment"]
     },
     {
-      "id": "function-line-limit",
+      "id": "redundant-if-statements",
       "description": "If statements must not be redundant",
       "severity": "warning",
       "kinds": ["function"],
@@ -142,7 +142,7 @@
     },
     {
       "id": "function-control-flow",
-      "description": "Control flow complexity must be low",
+      "description": "Functions should have one clear control-flow responsibility. Fail functions with three or more nested decisions or loops, or with several unrelated branching phases that should be named helpers. Guard clauses, straightforward retry loops, and focused worker-pool coordination pass.",
       "severity": "warning",
       "kinds": ["function"],
       "include": [

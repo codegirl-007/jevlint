@@ -1,6 +1,6 @@
 package bad
 
 type FeatureFlags struct {
-	Enabled bool
-	Sync    bool
+	Flag bool
+	Data bool
 }
