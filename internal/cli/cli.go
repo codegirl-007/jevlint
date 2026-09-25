@@ -125,63 +125,75 @@ func writeText(writer io.Writer, report runner.Report) {
 func writeTextStyled(writer io.Writer, report runner.Report, color bool) {
 	style := outputStyle{color: color}
 	for _, finding := range report.Findings {
-		severity := strings.ToUpper(string(finding.Severity))
-		fmt.Fprintln(
-			writer,
-			style.severity(finding.Severity, "✗ "+severity+"  "+finding.RuleID),
-		)
-		writeHighlightedDescription(writer, style, finding.Severity, finding.Description)
+		writeFinding(writer, style, finding)
+	}
+	writeSummary(writer, style, report.Findings)
+	writeReportTotals(writer, report)
+}
 
-		location := fmt.Sprintf("%s:%d", finding.Path, finding.StartLine)
-		if finding.EndLine != finding.StartLine {
-			location = fmt.Sprintf("%s-%d", location, finding.EndLine)
-		}
-		fmt.Fprintf(
-			writer,
-			"  %s %s %s %s\n",
-			style.paint("36", location),
-			style.paint("2", "·"),
-			finding.Kind,
-			finding.Name,
-		)
-		fmt.Fprintln(writer)
-		writeCodeFrame(writer, style, finding)
-		fmt.Fprintln(writer)
+func writeFinding(writer io.Writer, style outputStyle, finding runner.Finding) {
+	severity := strings.ToUpper(string(finding.Severity))
+	fmt.Fprintln(
+		writer,
+		style.severity(finding.Severity, "✗ "+severity+"  "+finding.RuleID),
+	)
+	writeHighlightedDescription(writer, style, finding.Severity, finding.Description)
+
+	location := fmt.Sprintf("%s:%d", finding.Path, finding.StartLine)
+	if finding.EndLine != finding.StartLine {
+		location = fmt.Sprintf("%s-%d", location, finding.EndLine)
+	}
+	fmt.Fprintf(
+		writer,
+		"  %s %s %s %s\n",
+		style.paint("36", location),
+		style.paint("2", "·"),
+		finding.Kind,
+		finding.Name,
+	)
+	fmt.Fprintln(writer)
+	writeCodeFrame(writer, style, finding)
+	fmt.Fprintln(writer)
+}
+
+func writeSummary(writer io.Writer, style outputStyle, findings []runner.Finding) {
+	if len(findings) == 0 {
+		fmt.Fprintln(writer, style.paint("1;32", "✓ No findings"))
+		return
 	}
 
-	if len(report.Findings) == 0 {
-		fmt.Fprintln(writer, style.paint("1;32", "✓ No findings"))
-	} else {
-		errors, warnings, information := findingCounts(report.Findings)
-		fmt.Fprintln(writer, style.paint("1", "Summary"))
+	errors, warnings, information := findingCounts(findings)
+	fmt.Fprintln(writer, style.paint("1", "Summary"))
+	fmt.Fprintf(
+		writer,
+		"  %s",
+		countLabel(len(findings), "finding", "findings"),
+	)
+	if errors > 0 {
 		fmt.Fprintf(
 			writer,
 			"  %s",
-			countLabel(len(report.Findings), "finding", "findings"),
+			style.paint("31", countLabel(errors, "error", "errors")),
 		)
-		if errors > 0 {
-			fmt.Fprintf(
-				writer,
-				"  %s",
-				style.paint("31", countLabel(errors, "error", "errors")),
-			)
-		}
-		if warnings > 0 {
-			fmt.Fprintf(
-				writer,
-				"  %s",
-				style.paint("33", countLabel(warnings, "warning", "warnings")),
-			)
-		}
-		if information > 0 {
-			fmt.Fprintf(
-				writer,
-				"  %s",
-				style.paint("36", countLabel(information, "info", "info")),
-			)
-		}
-		fmt.Fprintln(writer)
 	}
+	if warnings > 0 {
+		fmt.Fprintf(
+			writer,
+			"  %s",
+			style.paint("33", countLabel(warnings, "warning", "warnings")),
+		)
+	}
+	if information > 0 {
+		fmt.Fprintf(
+			writer,
+			"  %s",
+			style.paint("36", countLabel(information, "info", "info")),
+		)
+	}
+	fmt.Fprintln(writer)
+}
+
+func writeReportTotals(writer io.Writer, report runner.Report) {
 	fmt.Fprintf(
 		writer,
 		"  %d files · %d code units · %d evaluations\n",

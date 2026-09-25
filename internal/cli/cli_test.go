@@ -144,6 +144,82 @@ func TestWriteTextHighlightsRuleAndSnippet(t *testing.T) {
 	}
 }
 
+func TestWriteSummaryAndTotals(t *testing.T) {
+	t.Parallel()
+
+	findings := []runner.Finding{
+		{Severity: config.SeverityError},
+		{Severity: config.SeverityWarning},
+		{Severity: config.SeverityInfo},
+	}
+	tests := []struct {
+		name  string
+		color bool
+		want  string
+	}{
+		{
+			name: "plain",
+			want: "Summary\n  3 findings  1 error  1 warning  1 info\n" +
+				"  2 files · 4 code units · 6 evaluations\n",
+		},
+		{
+			name:  "colored",
+			color: true,
+			want: "\x1b[1mSummary\x1b[0m\n" +
+				"  3 findings  \x1b[31m1 error\x1b[0m" +
+				"  \x1b[33m1 warning\x1b[0m  \x1b[36m1 info\x1b[0m\n" +
+				"  2 files · 4 code units · 6 evaluations\n",
+		},
+	}
+
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			var output bytes.Buffer
+			writeSummary(&output, outputStyle{color: test.color}, findings)
+			writeReportTotals(&output, runner.Report{
+				ScannedFiles: 2,
+				CodeUnits:    4,
+				Evaluations:  6,
+			})
+			if output.String() != test.want {
+				t.Fatalf("output = %q, want %q", output.String(), test.want)
+			}
+		})
+	}
+}
+
+func TestWriteSummaryNoFindings(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		color bool
+		want  string
+	}{
+		{name: "plain", want: "✓ No findings\n"},
+		{
+			name:  "colored",
+			color: true,
+			want:  "\x1b[1;32m✓ No findings\x1b[0m\n",
+		},
+	}
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			var output bytes.Buffer
+			writeSummary(&output, outputStyle{color: test.color}, nil)
+			if output.String() != test.want {
+				t.Fatalf("output = %q, want %q", output.String(), test.want)
+			}
+		})
+	}
+}
+
 func TestHighlightedLinesEmitsSyntaxColors(t *testing.T) {
 	t.Parallel()
 

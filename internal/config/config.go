@@ -73,48 +73,91 @@ func (cfg Config) Validate() error {
 	ids := make(map[string]struct{}, len(cfg.Rules))
 	for index, rule := range cfg.Rules {
 		prefix := fmt.Sprintf("rules[%d]", index)
-		if strings.TrimSpace(rule.ID) == "" {
-			return fmt.Errorf("%s.id is required", prefix)
+		if err := validateRuleID(rule, prefix); err != nil {
+			return err
 		}
 		if _, exists := ids[rule.ID]; exists {
 			return fmt.Errorf("duplicate rule id %q", rule.ID)
 		}
 		ids[rule.ID] = struct{}{}
 
-		if strings.TrimSpace(rule.Description) == "" {
-			return fmt.Errorf("%s.description is required", prefix)
+		if err := validateRuleDescription(rule, prefix); err != nil {
+			return err
 		}
-		switch rule.Severity {
-		case SeverityInfo, SeverityWarning, SeverityError:
+		if err := validateRuleSeverity(rule, prefix); err != nil {
+			return err
+		}
+		if err := validateRulePatterns(rule, prefix); err != nil {
+			return err
+		}
+		if err := validateRuleLocalization(rule, prefix); err != nil {
+			return err
+		}
+		if err := validateRuleKinds(rule, prefix); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateRuleID(rule Rule, prefix string) error {
+	if strings.TrimSpace(rule.ID) == "" {
+		return fmt.Errorf("%s.id is required", prefix)
+	}
+	return nil
+}
+
+func validateRuleDescription(rule Rule, prefix string) error {
+	if strings.TrimSpace(rule.Description) == "" {
+		return fmt.Errorf("%s.description is required", prefix)
+	}
+	return nil
+}
+
+func validateRuleSeverity(rule Rule, prefix string) error {
+	switch rule.Severity {
+	case SeverityInfo, SeverityWarning, SeverityError:
+		return nil
+	default:
+		return fmt.Errorf("%s.severity must be info, warning, or error", prefix)
+	}
+}
+
+func validateRulePatterns(rule Rule, prefix string) error {
+	patterns := append(append([]string{}, rule.Include...), rule.Exclude...)
+	for _, pattern := range patterns {
+		if strings.TrimSpace(pattern) == "" {
+			return fmt.Errorf("%s contains an empty file pattern", prefix)
+		}
+	}
+	return nil
+}
+
+func validateRuleLocalization(rule Rule, prefix string) error {
+	for _, category := range rule.Localize {
+		switch category {
+		case "comment", "field", "statement":
 		default:
-			return fmt.Errorf("%s.severity must be info, warning, or error", prefix)
+			return fmt.Errorf(
+				"%s.localize contains invalid category %q; want comment, field, or statement",
+				prefix,
+				category,
+			)
 		}
-		for _, pattern := range append(append([]string{}, rule.Include...), rule.Exclude...) {
-			if strings.TrimSpace(pattern) == "" {
-				return fmt.Errorf("%s contains an empty file pattern", prefix)
-			}
-		}
-		for _, category := range rule.Localize {
-			switch category {
-			case "comment", "field", "statement":
-			default:
-				return fmt.Errorf(
-					"%s.localize contains invalid category %q; want comment, field, or statement",
-					prefix,
-					category,
-				)
-			}
-		}
-		for _, kind := range rule.Kinds {
-			switch kind {
-			case "function", "type":
-			default:
-				return fmt.Errorf(
-					"%s.kinds contains invalid kind %q; want function or type",
-					prefix,
-					kind,
-				)
-			}
+	}
+	return nil
+}
+
+func validateRuleKinds(rule Rule, prefix string) error {
+	for _, kind := range rule.Kinds {
+		switch kind {
+		case "function", "type":
+		default:
+			return fmt.Errorf(
+				"%s.kinds contains invalid kind %q; want function or type",
+				prefix,
+				kind,
+			)
 		}
 	}
 	return nil
