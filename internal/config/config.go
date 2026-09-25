@@ -14,18 +14,14 @@ type Config struct {
 }
 
 type Rule struct {
-	ID          string    `json:"id"`
-	Description string    `json:"description"`
-	Severity    Severity  `json:"severity"`
-	Include     []string  `json:"include,omitempty"`
-	Exclude     []string  `json:"exclude,omitempty"`
-	Exceptions  []string  `json:"exceptions,omitempty"`
-	Examples    *Examples `json:"examples,omitempty"`
-}
-
-type Examples struct {
-	Good []string `json:"good,omitempty"`
-	Bad  []string `json:"bad,omitempty"`
+	ID          string   `json:"id"`
+	Description string   `json:"description"`
+	Severity    Severity `json:"severity"`
+	Include     []string `json:"include,omitempty"`
+	Exclude     []string `json:"exclude,omitempty"`
+	Exceptions  []string `json:"exceptions,omitempty"`
+	Kinds       []string `json:"kinds,omitempty"`
+	Localize    []string `json:"localize,omitempty"`
 }
 
 type Severity string
@@ -96,6 +92,28 @@ func (cfg Config) Validate() error {
 		for _, pattern := range append(append([]string{}, rule.Include...), rule.Exclude...) {
 			if strings.TrimSpace(pattern) == "" {
 				return fmt.Errorf("%s contains an empty file pattern", prefix)
+			}
+		}
+		for _, category := range rule.Localize {
+			switch category {
+			case "comment", "field", "statement":
+			default:
+				return fmt.Errorf(
+					"%s.localize contains invalid category %q; want comment, field, or statement",
+					prefix,
+					category,
+				)
+			}
+		}
+		for _, kind := range rule.Kinds {
+			switch kind {
+			case "function", "type":
+			default:
+				return fmt.Errorf(
+					"%s.kinds contains invalid kind %q; want function or type",
+					prefix,
+					kind,
+				)
 			}
 		}
 	}

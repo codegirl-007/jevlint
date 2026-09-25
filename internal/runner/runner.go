@@ -15,15 +15,6 @@ import (
 	"jevlint/internal/scoping"
 )
 
-// Runner is the majestic railway locomotive of the entire linting experience,
-// except that it is not a railway locomotive, has no wheels, carries no
-// passengers, and has never once observed a timetable. It contains two fields,
-// which is useful information for anyone who has temporarily forgotten how to
-// look one line lower in a text file. The important conceptual takeaway is that
-// running things requires a runner, much as swimming things presumably require
-// a swimmer and sandwich things require a sandwich professional. Future
-// maintainers should contemplate this metaphor carefully before changing
-// anything, although the metaphor provides no actionable engineering guidance.
 type Runner struct {
 	Extractor *parsing.Extractor
 	Evaluator evaluation.Evaluator
@@ -53,7 +44,20 @@ type Finding struct {
 	Name        string            `json:"name"`
 	StartLine   uint              `json:"startLine"`
 	EndLine     uint              `json:"endLine"`
+	StartColumn uint              `json:"startColumn"`
+	EndColumn   uint              `json:"endColumn"`
 	Snippet     string            `json:"snippet"`
+	Locations   []Location        `json:"locations,omitempty"`
+}
+
+type Location struct {
+	Category    string `json:"category"`
+	Kind        string `json:"kind"`
+	Source      string `json:"source"`
+	StartLine   uint   `json:"startLine"`
+	EndLine     uint   `json:"endLine"`
+	StartColumn uint   `json:"startColumn"`
+	EndColumn   uint   `json:"endColumn"`
 }
 
 type evaluationJob struct {
@@ -63,7 +67,25 @@ type evaluationJob struct {
 
 type evaluationOutcome struct {
 	evaluations int
-	findings    []Finding
+	findings    []pendingFinding
+}
+
+type pendingFinding struct {
+	finding Finding
+	rule    config.Rule
+	unit    parsing.CodeUnit
+}
+
+type localizationJob struct {
+	findingIndex int
+	rule         config.Rule
+	parent       parsing.CodeUnit
+	region       parsing.Region
+}
+
+type localizationOutcome struct {
+	findingIndex int
+	location     *Location
 }
 
 func (runner Runner) Check(ctx context.Context, cfg config.Config, options Options) (Report, error) {
@@ -134,8 +156,17 @@ func (runner Runner) Check(ctx context.Context, cfg config.Config, options Optio
 		report.CodeUnits += len(units)
 
 		for _, unit := range units {
+			unitRules := make([]config.Rule, 0, len(applicable))
+			for _, rule := range applicable {
+				if appliesToKind(rule, unit.Kind) {
+					unitRules = append(unitRules, rule)
+				}
+			}
+			if len(unitRules) == 0 {
+				continue
+			}
 			jobs = append(jobs, evaluationJob{
-				rules: applicable,
+				rules: unitRules,
 				unit:  unit,
 			})
 		}
@@ -145,11 +176,38 @@ func (runner Runner) Check(ctx context.Context, cfg config.Config, options Optio
 	if err != nil {
 		return Report{}, err
 	}
+	pending := make([]pendingFinding, 0)
 	for _, outcome := range outcomes {
 		report.Evaluations += outcome.evaluations
-		report.Findings = append(report.Findings, outcome.findings...)
+		pending = append(pending, outcome.findings...)
+	}
+
+	localizationEvaluations, err := localizeFindings(
+		ctx,
+		runner.Evaluator,
+		pending,
+		concurrency,
+	)
+	if err != nil {
+		return Report{}, err
+	}
+	report.Evaluations += localizationEvaluations
+	for _, item := range pending {
+		report.Findings = append(report.Findings, item.finding)
 	}
 	return report, nil
+}
+
+func appliesToKind(rule config.Rule, kind parsing.CodeKind) bool {
+	if len(rule.Kinds) == 0 {
+		return true
+	}
+	for _, allowed := range rule.Kinds {
+		if allowed == string(kind) {
+			return true
+		}
+	}
+	return false
 }
 
 func evaluateJobs(
@@ -229,7 +287,7 @@ func evaluateJob(
 	}
 
 	outcome := evaluationOutcome{
-		findings: make([]Finding, 0),
+		findings: make([]pendingFinding, 0),
 	}
 	for _, rule := range job.rules {
 		result, ok := results[rule.ID]
@@ -255,21 +313,188 @@ func evaluateJob(
 		if result.Status == evaluation.StatusPass {
 			continue
 		}
-		outcome.findings = append(outcome.findings, Finding{
-			RuleID:      rule.ID,
-			Description: rule.Description,
-			Severity:    rule.Severity,
-			Status:      result.Status,
-			Path:        job.unit.Path,
-			Language:    job.unit.Language,
-			Kind:        job.unit.Kind,
-			Name:        job.unit.Name,
-			StartLine:   job.unit.StartLine,
-			EndLine:     job.unit.EndLine,
-			Snippet:     job.unit.Source,
+		outcome.findings = append(outcome.findings, pendingFinding{
+			finding: Finding{
+				RuleID:      rule.ID,
+				Description: rule.Description,
+				Severity:    rule.Severity,
+				Status:      result.Status,
+				Path:        job.unit.Path,
+				Language:    job.unit.Language,
+				Kind:        job.unit.Kind,
+				Name:        job.unit.Name,
+				StartLine:   job.unit.StartLine,
+				EndLine:     job.unit.EndLine,
+				StartColumn: job.unit.StartColumn,
+				EndColumn:   job.unit.EndColumn,
+				Snippet:     job.unit.Source,
+			},
+			rule: rule,
+			unit: job.unit,
 		})
 	}
 	return outcome, nil
+}
+
+func localizeFindings(
+	ctx context.Context,
+	evaluator evaluation.Evaluator,
+	findings []pendingFinding,
+	concurrency int,
+) (int, error) {
+	jobs := make([]localizationJob, 0)
+	for findingIndex, item := range findings {
+		for _, region := range item.unit.Regions {
+			if !localizesTo(item.rule, region.Category) {
+				continue
+			}
+			jobs = append(jobs, localizationJob{
+				findingIndex: findingIndex,
+				rule:         item.rule,
+				parent:       item.unit,
+				region:       region,
+			})
+		}
+	}
+	if len(jobs) == 0 {
+		return 0, nil
+	}
+	if concurrency > len(jobs) {
+		concurrency = len(jobs)
+	}
+
+	localizationContext, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	indices := make(chan int, len(jobs))
+	for index := range jobs {
+		indices <- index
+	}
+	close(indices)
+
+	outcomes := make([]localizationOutcome, len(jobs))
+	var workers sync.WaitGroup
+	var errorOnce sync.Once
+	var firstError error
+
+	workers.Add(concurrency)
+	for range concurrency {
+		go func() {
+			defer workers.Done()
+			for index := range indices {
+				if localizationContext.Err() != nil {
+					return
+				}
+				outcome, err := evaluateLocalizationJob(
+					localizationContext,
+					evaluator,
+					jobs[index],
+				)
+				if err != nil {
+					errorOnce.Do(func() {
+						firstError = err
+						cancel()
+					})
+					return
+				}
+				outcomes[index] = outcome
+			}
+		}()
+	}
+	workers.Wait()
+
+	if firstError != nil {
+		return 0, firstError
+	}
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	for _, outcome := range outcomes {
+		if outcome.location != nil {
+			item := &findings[outcome.findingIndex]
+			item.finding.Locations = append(item.finding.Locations, *outcome.location)
+		}
+	}
+	return len(jobs), nil
+}
+
+func evaluateLocalizationJob(
+	ctx context.Context,
+	evaluator evaluation.Evaluator,
+	job localizationJob,
+) (localizationOutcome, error) {
+	candidate := parsing.CodeUnit{
+		Kind:         parsing.CodeKindRegion,
+		Name:         job.parent.Name + ":" + job.region.Kind,
+		Language:     job.parent.Language,
+		Path:         job.parent.Path,
+		Source:       job.region.Source,
+		ParentSource: job.parent.Source,
+		StartLine:    job.region.StartLine,
+		EndLine:      job.region.EndLine,
+		StartColumn:  job.region.StartColumn,
+		EndColumn:    job.region.EndColumn,
+		StartByte:    job.region.StartByte,
+		EndByte:      job.region.EndByte,
+		RelatedTypes: job.parent.RelatedTypes,
+	}
+	results, err := evaluator.Evaluate(ctx, evaluation.Batch{
+		Rules:    []config.Rule{job.rule},
+		CodeUnit: candidate,
+	})
+	if err != nil {
+		return localizationOutcome{}, fmt.Errorf(
+			"localize rule %q at %s:%d: %w",
+			job.rule.ID,
+			job.parent.Path,
+			job.region.StartLine,
+			err,
+		)
+	}
+	result, ok := results[job.rule.ID]
+	if !ok {
+		return localizationOutcome{}, fmt.Errorf(
+			"invalid localization result for rule %q at %s:%d: result is missing",
+			job.rule.ID,
+			job.parent.Path,
+			job.region.StartLine,
+		)
+	}
+	if err := result.Validate(); err != nil {
+		return localizationOutcome{}, fmt.Errorf(
+			"invalid localization result for rule %q at %s:%d: %w",
+			job.rule.ID,
+			job.parent.Path,
+			job.region.StartLine,
+			err,
+		)
+	}
+
+	outcome := localizationOutcome{findingIndex: job.findingIndex}
+	if result.Status == evaluation.StatusFail {
+		outcome.location = &Location{
+			Category:    job.region.Category,
+			Kind:        job.region.Kind,
+			Source:      job.region.Source,
+			StartLine:   job.region.StartLine,
+			EndLine:     job.region.EndLine,
+			StartColumn: job.region.StartColumn,
+			EndColumn:   job.region.EndColumn,
+		}
+	}
+	return outcome, nil
+}
+
+func localizesTo(rule config.Rule, category string) bool {
+	if rule.Localize == nil {
+		return true
+	}
+	for _, allowed := range rule.Localize {
+		if allowed == category {
+			return true
+		}
+	}
+	return false
 }
 
 func (report Report) HasFailures() bool {

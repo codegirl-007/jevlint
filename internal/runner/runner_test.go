@@ -23,6 +23,26 @@ type barrierEvaluator struct {
 	release chan struct{}
 }
 
+type booleanFieldEvaluator struct{}
+
+func (booleanFieldEvaluator) Evaluate(
+	_ context.Context,
+	batch evaluation.Batch,
+) (map[string]evaluation.Result, error) {
+	status := evaluation.StatusPass
+	if batch.CodeUnit.Kind == parsing.CodeKindType ||
+		batch.CodeUnit.Kind == parsing.CodeKindRegion &&
+			strings.HasPrefix(batch.CodeUnit.Source, "Enabled") {
+		status = evaluation.StatusFail
+	}
+	return map[string]evaluation.Result{
+		"boolean-property-prefix": {
+			Status:     status,
+			Confidence: 1,
+		},
+	}, nil
+}
+
 func (evaluator *barrierEvaluator) Evaluate(
 	ctx context.Context,
 	batch evaluation.Batch,
@@ -101,24 +121,27 @@ func TestCheckBatchesRulesPerFunctionAndRetainsSnippet(t *testing.T) {
 		t.Fatalf("Check() error = %v", err)
 	}
 
-	if evaluator.calls != 2 {
-		t.Fatalf("evaluator calls = %d, want 2", evaluator.calls)
+	if evaluator.calls != 3 {
+		t.Fatalf("evaluator calls = %d, want 3", evaluator.calls)
 	}
-	if len(evaluator.batches) != 2 ||
+	if len(evaluator.batches) != 3 ||
 		len(evaluator.batches[0].Rules) != 2 ||
-		len(evaluator.batches[1].Rules) != 2 {
+		len(evaluator.batches[1].Rules) != 2 ||
+		len(evaluator.batches[2].Rules) != 1 {
 		t.Fatalf("batches = %#v", evaluator.batches)
 	}
 	if evaluator.batches[0].CodeUnit.Kind != parsing.CodeKindType ||
-		evaluator.batches[1].CodeUnit.Kind != parsing.CodeKindFunction {
+		evaluator.batches[1].CodeUnit.Kind != parsing.CodeKindFunction ||
+		evaluator.batches[2].CodeUnit.Kind != parsing.CodeKindRegion {
 		t.Fatalf(
-			"batch kinds = %s, %s",
+			"batch kinds = %s, %s, %s",
 			evaluator.batches[0].CodeUnit.Kind,
 			evaluator.batches[1].CodeUnit.Kind,
+			evaluator.batches[2].CodeUnit.Kind,
 		)
 	}
-	if report.Evaluations != 4 {
-		t.Fatalf("evaluations = %d, want 4", report.Evaluations)
+	if report.Evaluations != 5 {
+		t.Fatalf("evaluations = %d, want 5", report.Evaluations)
 	}
 	if len(report.Findings) != 1 {
 		t.Fatalf("findings = %#v", report.Findings)
@@ -183,5 +206,59 @@ func TestCheckEvaluatesFunctionsConcurrently(t *testing.T) {
 	}
 	if result.report.Evaluations != 2 {
 		t.Fatalf("evaluations = %d, want 2", result.report.Evaluations)
+	}
+}
+
+func TestCheckLocalizesFailedRuleToTreeSitterRegion(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	source := "package sample\n\n// FeatureFlags controls behavior.\n" +
+		"type FeatureFlags struct {\n\tEnabled bool\n\tIsReady bool\n}\n\n" +
+		"func ReadFlags() {}\n"
+	if err := os.WriteFile(filepath.Join(root, "flags.go"), []byte(source), 0o600); err != nil {
+		t.Fatalf("write source: %v", err)
+	}
+
+	cfg := config.Config{Rules: []config.Rule{{
+		ID:          "boolean-property-prefix",
+		Description: "Boolean fields begin with Is or Should.",
+		Severity:    config.SeverityWarning,
+		Kinds:       []string{"type"},
+		Localize:    []string{"field"},
+	}}}
+	report, err := (Runner{
+		Extractor: parsing.NewExtractor(),
+		Evaluator: booleanFieldEvaluator{},
+	}).Check(context.Background(), cfg, Options{Root: root, Concurrency: 2})
+	if err != nil {
+		t.Fatalf("Check() error = %v", err)
+	}
+	if report.Evaluations != 3 {
+		t.Fatalf("evaluations = %d, want initial type plus two fields", report.Evaluations)
+	}
+	if len(report.Findings) != 1 {
+		t.Fatalf("findings = %#v", report.Findings)
+	}
+	locations := report.Findings[0].Locations
+	if len(locations) != 1 {
+		t.Fatalf("locations = %#v", locations)
+	}
+	if locations[0].Source != "Enabled bool" ||
+		locations[0].Category != "field" ||
+		locations[0].StartLine != 5 ||
+		locations[0].StartColumn != 1 {
+		t.Fatalf("location = %#v", locations[0])
+	}
+}
+
+func TestLocalizesToDistinguishesOmittedAndExplicitEmpty(t *testing.T) {
+	t.Parallel()
+
+	if !localizesTo(config.Rule{}, "statement") {
+		t.Fatal("omitted localization should allow every category")
+	}
+	if localizesTo(config.Rule{Localize: []string{}}, "statement") {
+		t.Fatal("explicit empty localization should disable the second pass")
 	}
 }

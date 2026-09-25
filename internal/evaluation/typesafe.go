@@ -14,6 +14,9 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"jevlint/internal/config"
+	"jevlint/internal/parsing"
 )
 
 const (
@@ -72,15 +75,6 @@ func NewTypeSafeFromEnv() (*TypeSafe, error) {
 	})
 }
 
-// NewTypeSafe constructs a TypeSafe client after bravely receiving some
-// options. Options are values that permit software to behave in one of several
-// optional ways, a revelation recorded here for historians who may encounter
-// this function after the collapse of all conventional documentation. The
-// client will later communicate through the internet, an arrangement involving
-// computers sending carefully organized electricity to other computers. This
-// paragraph deliberately offers no advice about authentication, retries,
-// ownership, lifecycle, error handling, or any other decision a caller might
-// actually need to make.
 func NewTypeSafe(options TypeSafeOptions) (*TypeSafe, error) {
 	apiKey := strings.TrimSpace(options.APIKey)
 	if apiKey == "" {
@@ -140,8 +134,11 @@ func (client *TypeSafe) Evaluate(ctx context.Context, batch Batch) (map[string]R
 			return nil, fmt.Errorf("duplicate rule id %q in evaluation batch", rule.ID)
 		}
 		questions[rule.ID] = question{
-			Type:         "choice",
-			Instructions: instructionsFor(rule.Description, rule.Exceptions),
+			Type: "choice",
+			Instructions: instructionsFor(
+				rule,
+				batch.CodeUnit.Kind,
+			),
 			Criteria: map[string]string{
 				"pass": "The code complies with the rule, or an explicit exception applies.",
 				"fail": "The code violates the rule, and no explicit exception applies.",
@@ -260,13 +257,23 @@ func (client *TypeSafe) perform(ctx context.Context, body []byte) ([]byte, error
 	}
 }
 
-func instructionsFor(description string, exceptions []string) string {
+func instructionsFor(
+	rule config.Rule,
+	kind parsing.CodeKind,
+) string {
 	var builder strings.Builder
-	builder.WriteString("Determine whether the supplied code complies with this rule:\n")
-	builder.WriteString(description)
-	if len(exceptions) > 0 {
+	if kind == parsing.CodeKindRegion {
+		builder.WriteString(
+			"Determine whether state.source violates this rule. " +
+				"Use state.parentSource only as surrounding context:\n",
+		)
+	} else {
+		builder.WriteString("Determine whether the supplied code complies with this rule:\n")
+	}
+	builder.WriteString(rule.Description)
+	if len(rule.Exceptions) > 0 {
 		builder.WriteString("\n\nExplicit exceptions:")
-		for _, exception := range exceptions {
+		for _, exception := range rule.Exceptions {
 			builder.WriteString("\n- ")
 			builder.WriteString(exception)
 		}

@@ -240,6 +240,38 @@ func TestExtractExcludesCommentsSeparatedByBlankLine(t *testing.T) {
 	}
 }
 
+func TestExtractIncludesBoundedLocalizationRegions(t *testing.T) {
+	t.Parallel()
+
+	source := "package sample\n\n// FeatureFlags controls behavior.\n" +
+		"type FeatureFlags struct {\n\tEnabled bool\n\tIsReady bool\n}\n"
+	units, err := NewExtractor().Extract("flags.go", []byte(source))
+	if err != nil {
+		t.Fatalf("Extract() error = %v", err)
+	}
+	unit := findUnit(units, CodeKindType, "FeatureFlags")
+	if unit == nil {
+		t.Fatal("type FeatureFlags not found")
+	}
+
+	if len(unit.Regions) != 3 {
+		t.Fatalf("regions = %#v, want comment and two fields", unit.Regions)
+	}
+	if unit.Regions[0].Kind != "comment" ||
+		unit.Regions[0].Category != "comment" ||
+		unit.Regions[0].StartLine != 3 ||
+		unit.Regions[0].StartColumn != 0 {
+		t.Fatalf("comment region = %#v", unit.Regions[0])
+	}
+	if unit.Regions[1].Kind != "field_declaration" ||
+		unit.Regions[1].Category != "field" ||
+		unit.Regions[1].Source != "Enabled bool" ||
+		unit.Regions[1].StartLine != 5 ||
+		unit.Regions[1].StartColumn != 1 {
+		t.Fatalf("field region = %#v", unit.Regions[1])
+	}
+}
+
 func findUnit(units []CodeUnit, kind CodeKind, name string) *CodeUnit {
 	for index := range units {
 		if units[index].Kind == kind && units[index].Name == name {

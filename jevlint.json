@@ -4,6 +4,7 @@
       "id": "database-joins",
       "description": "When related records come from the same database, combine them in the database query rather than matching, merging, or enriching them in application code.",
       "severity": "error",
+      "kinds": ["function"],
       "include": [
         "**/*.js",
         "**/*.jsx",
@@ -14,19 +15,34 @@
         "**/*.rs"
       ],
       "exclude": [
+        "**/examples/**",
+        "**/test/**",
+        "**/tests/**",
+        "**/testdata/**",
+        "**/__tests__/**",
         "**/*_test.go",
         "**/*.test.js",
-        "**/*.test.ts"
+        "**/*.test.jsx",
+        "**/*.test.ts",
+        "**/*.test.tsx",
+        "**/*.spec.js",
+        "**/*.spec.jsx",
+        "**/*.spec.ts",
+        "**/*.spec.tsx",
+        "**/test_*.py",
+        "**/*_test.py"
       ],
       "exceptions": [
         "The data comes from different services or databases.",
         "The join cannot reasonably be expressed by the database or ORM."
-      ]
+      ],
+      "localize": ["statement"]
     },
     {
       "id": "boolean-property-prefix",
-      "description": "For type declarations, every boolean property or field name must begin with Is or Should. Code units that are not type declarations pass this rule.",
+      "description": "Every boolean property or field in a type declaration must have a name beginning with Is or Should.",
       "severity": "error",
+      "kinds": ["type"],
       "include": [
         "**/*.js",
         "**/*.jsx",
@@ -35,12 +51,32 @@
         "**/*.py",
         "**/*.go",
         "**/*.rs"
-      ]
+      ],
+      "exclude": [
+        "**/examples/**",
+        "**/test/**",
+        "**/tests/**",
+        "**/testdata/**",
+        "**/__tests__/**",
+        "**/*_test.go",
+        "**/*.test.js",
+        "**/*.test.jsx",
+        "**/*.test.ts",
+        "**/*.test.tsx",
+        "**/*.spec.js",
+        "**/*.spec.jsx",
+        "**/*.spec.ts",
+        "**/*.spec.tsx",
+        "**/test_*.py",
+        "**/*_test.py"
+      ],
+      "localize": ["field"]
     },
     {
       "id": "comment-quality",
       "description": "Comments should be helpful and concise without focusing too much on what the code is doing.",
       "severity": "warning",
+      "kinds": ["function", "type"],
       "include": [
         "**/*.js",
         "**/*.jsx",
@@ -49,7 +85,128 @@
         "**/*.py",
         "**/*.go",
         "**/*.rs"
-      ]
+      ],
+      "exclude": [
+        "**/examples/**",
+        "**/test/**",
+        "**/tests/**",
+        "**/testdata/**",
+        "**/__tests__/**",
+        "**/*_test.go",
+        "**/*.test.js",
+        "**/*.test.jsx",
+        "**/*.test.ts",
+        "**/*.test.tsx",
+        "**/*.spec.js",
+        "**/*.spec.jsx",
+        "**/*.spec.ts",
+        "**/*.spec.tsx",
+        "**/test_*.py",
+        "**/*_test.py"
+      ],
+      "localize": ["comment"]
+    },
+    {
+      "id": "function-line-limit",
+      "description": "If statements must not be redundant",
+      "severity": "warning",
+      "kinds": ["function"],
+      "include": [
+        "**/*.js",
+        "**/*.jsx",
+        "**/*.ts",
+        "**/*.tsx",
+        "**/*.py",
+        "**/*.go",
+        "**/*.rs"
+      ],
+      "exclude": [
+        "**/examples/**",
+        "**/test/**",
+        "**/tests/**",
+        "**/testdata/**",
+        "**/__tests__/**",
+        "**/*_test.go",
+        "**/*.test.js",
+        "**/*.test.jsx",
+        "**/*.test.ts",
+        "**/*.test.tsx",
+        "**/*.spec.js",
+        "**/*.spec.jsx",
+        "**/*.spec.ts",
+        "**/*.spec.tsx",
+        "**/test_*.py",
+        "**/*_test.py"
+      ],
+      "localize": []
+    },
+    {
+      "id": "function-control-flow",
+      "description": "Control flow complexity must be low",
+      "severity": "warning",
+      "kinds": ["function"],
+      "include": [
+        "**/*.js",
+        "**/*.jsx",
+        "**/*.ts",
+        "**/*.tsx",
+        "**/*.py",
+        "**/*.go",
+        "**/*.rs"
+      ],
+      "exclude": [
+        "**/examples/**",
+        "**/test/**",
+        "**/tests/**",
+        "**/testdata/**",
+        "**/__tests__/**",
+        "**/*_test.go",
+        "**/*.test.js",
+        "**/*.test.jsx",
+        "**/*.test.ts",
+        "**/*.test.tsx",
+        "**/*.spec.js",
+        "**/*.spec.jsx",
+        "**/*.spec.ts",
+        "**/*.spec.tsx",
+        "**/test_*.py",
+        "**/*_test.py"
+      ],
+      "localize": []
+    },
+    {
+      "id": "redundant-type-properties",
+      "description": "Types should not have redundant properties where data can be inferred from other properties.",
+      "severity": "warning",
+      "kinds": ["type"],
+      "include": [
+        "**/*.js",
+        "**/*.jsx",
+        "**/*.ts",
+        "**/*.tsx",
+        "**/*.py",
+        "**/*.go",
+        "**/*.rs"
+      ],
+      "exclude": [
+        "**/examples/**",
+        "**/test/**",
+        "**/tests/**",
+        "**/testdata/**",
+        "**/__tests__/**",
+        "**/*_test.go",
+        "**/*.test.js",
+        "**/*.test.jsx",
+        "**/*.test.ts",
+        "**/*.test.tsx",
+        "**/*.spec.js",
+        "**/*.spec.jsx",
+        "**/*.spec.ts",
+        "**/*.spec.tsx",
+        "**/test_*.py",
+        "**/*_test.py"
+      ],
+      "localize": ["field"]
     }
   ]
 }

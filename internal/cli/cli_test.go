@@ -72,6 +72,10 @@ func JoinInCode() {
 		report.Findings[0].Name != "JoinInCode" {
 		t.Fatalf("finding target = %s %q", report.Findings[0].Kind, report.Findings[0].Name)
 	}
+	if len(report.Findings[0].Locations) != 1 ||
+		report.Findings[0].Locations[0].Kind != "expression_statement" {
+		t.Fatalf("finding locations = %#v", report.Findings[0].Locations)
+	}
 	if bytes.Contains(stdout.Bytes(), []byte(`"confidence"`)) {
 		t.Fatalf("JSON output exposes confidence: %s", stdout.String())
 	}
@@ -95,6 +99,14 @@ func TestWriteTextHighlightsRuleAndSnippet(t *testing.T) {
 			StartLine:   3,
 			EndLine:     5,
 			Snippet:     "func JoinInCode() {\n\tprintln(\"join\")\n}",
+			Locations: []runner.Location{{
+				Kind:        "expression_statement",
+				Source:      `println("join")`,
+				StartLine:   4,
+				EndLine:     4,
+				StartColumn: 1,
+				EndColumn:   16,
+			}},
 		}},
 	}
 	var output bytes.Buffer
@@ -104,7 +116,8 @@ func TestWriteTextHighlightsRuleAndSnippet(t *testing.T) {
 		"✗ ERROR  database-joins",
 		"store.go:3-5",
 		"Join records in the database.",
-		"  │ func JoinInCode() {",
+		"  3 │ func JoinInCode() {",
+		"    │     ^^^^^^^^^^^^^^^",
 		"Summary",
 	} {
 		if !strings.Contains(output.String(), expected) {
@@ -128,6 +141,15 @@ func TestWriteTextHighlightsRuleAndSnippet(t *testing.T) {
 		"\x1b[1;31mJoin records in the database.\x1b[0m",
 	) {
 		t.Fatalf("colored output does not highlight description: %q", colored.String())
+	}
+}
+
+func TestHighlightedLinesEmitsSyntaxColors(t *testing.T) {
+	t.Parallel()
+
+	lines := highlightedLines("func main() {}", "go", true)
+	if !strings.Contains(strings.Join(lines, "\n"), "\x1b[") {
+		t.Fatalf("highlighted lines contain no ANSI colors: %#v", lines)
 	}
 }
 

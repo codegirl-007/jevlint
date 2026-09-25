@@ -145,9 +145,7 @@ func writeTextStyled(writer io.Writer, report runner.Report, color bool) {
 			finding.Name,
 		)
 		fmt.Fprintln(writer)
-		for _, line := range strings.Split(finding.Snippet, "\n") {
-			fmt.Fprintf(writer, "  %s %s\n", style.paint("36", "│"), line)
-		}
+		writeCodeFrame(writer, style, finding)
 		fmt.Fprintln(writer)
 	}
 

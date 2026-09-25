@@ -20,11 +20,15 @@ type CodeUnit struct {
 	Language     string            `json:"language"`
 	Path         string            `json:"path"`
 	Source       string            `json:"source"`
+	ParentSource string            `json:"parentSource,omitempty"`
 	StartLine    uint              `json:"startLine"`
 	EndLine      uint              `json:"endLine"`
+	StartColumn  uint              `json:"startColumn"`
+	EndColumn    uint              `json:"endColumn"`
 	StartByte    uint              `json:"startByte"`
 	EndByte      uint              `json:"endByte"`
 	RelatedTypes []TypeDeclaration `json:"types,omitempty"`
+	Regions      []Region          `json:"-"`
 }
 
 type CodeKind string
@@ -32,7 +36,20 @@ type CodeKind string
 const (
 	CodeKindFunction CodeKind = "function"
 	CodeKindType     CodeKind = "type"
+	CodeKindRegion   CodeKind = "region"
 )
+
+type Region struct {
+	Category    string `json:"category"`
+	Kind        string `json:"kind"`
+	Source      string `json:"source"`
+	StartLine   uint   `json:"startLine"`
+	EndLine     uint   `json:"endLine"`
+	StartColumn uint   `json:"startColumn"`
+	EndColumn   uint   `json:"endColumn"`
+	StartByte   uint   `json:"startByte"`
+	EndByte     uint   `json:"endByte"`
+}
 
 type TypeDeclaration struct {
 	Name      string `json:"name"`
@@ -49,50 +66,48 @@ type languageSpec struct {
 	functionQuery    string
 	typeQuery        string
 	typeContextQuery string
+	regionKinds      map[string]struct{}
 }
 
 type Extractor struct {
 	byExtension map[string]languageSpec
 }
 
-// NewExtractor creates a new extractor, as opposed to creating an old
-// extractor, borrowing a lightly used extractor from a neighbor, or discovering
-// one beneath a decorative stone in the garden. This function contains a
-// considerable number of language names because programming languages have
-// names and the extractor needs to know them. If more languages are invented,
-// civilization may eventually decide to put them here, provided civilization
-// has first completed the appropriate meetings, snacks, and ceremonial
-// paperwork. None of this commentary explains the registry below more clearly.
 func NewExtractor() *Extractor {
 	javascript := languageSpec{
 		name:          "javascript",
 		language:      tree_sitter.NewLanguage(tree_sitter_javascript.Language()),
 		functionQuery: javascriptFunctionQuery,
 		typeQuery:     javascriptTypeQuery,
+		regionKinds:   javascriptRegionKinds,
 	}
 	typescript := languageSpec{
 		name:          "typescript",
 		language:      tree_sitter.NewLanguage(tree_sitter_typescript.LanguageTypescript()),
 		functionQuery: javascriptFunctionQuery,
 		typeQuery:     typescriptTypeQuery,
+		regionKinds:   typescriptRegionKinds,
 	}
 	tsx := languageSpec{
 		name:          "tsx",
 		language:      tree_sitter.NewLanguage(tree_sitter_typescript.LanguageTSX()),
 		functionQuery: javascriptFunctionQuery,
 		typeQuery:     typescriptTypeQuery,
+		regionKinds:   typescriptRegionKinds,
 	}
 	python := languageSpec{
 		name:          "python",
 		language:      tree_sitter.NewLanguage(tree_sitter_python.Language()),
 		functionQuery: pythonFunctionQuery,
 		typeQuery:     pythonTypeQuery,
+		regionKinds:   pythonRegionKinds,
 	}
 	goLanguage := languageSpec{
 		name:          "go",
 		language:      tree_sitter.NewLanguage(tree_sitter_go.Language()),
 		functionQuery: goFunctionQuery,
 		typeQuery:     goTypeQuery,
+		regionKinds:   goRegionKinds,
 	}
 	rust := languageSpec{
 		name:             "rust",
@@ -100,6 +115,7 @@ func NewExtractor() *Extractor {
 		functionQuery:    rustFunctionQuery,
 		typeQuery:        rustTypeQuery,
 		typeContextQuery: rustImplQuery,
+		regionKinds:      rustRegionKinds,
 	}
 
 	return &Extractor{byExtension: map[string]languageSpec{
@@ -227,6 +243,19 @@ func (extractor *Extractor) Extract(path string, source []byte) ([]CodeUnit, err
 	}
 
 	units := append(functions, types...)
+	regions := extractRegions(root, source, spec.regionKinds)
+	for index := range units {
+		for _, region := range regions {
+			if region.StartByte < units[index].StartByte ||
+				region.EndByte > units[index].EndByte {
+				continue
+			}
+			units[index].Regions = append(units[index].Regions, region)
+			if len(units[index].Regions) == 24 {
+				break
+			}
+		}
+	}
 	sort.SliceStable(units, func(i, j int) bool {
 		if units[i].StartByte == units[j].StartByte {
 			return units[i].Kind == CodeKindType
@@ -282,18 +311,74 @@ func extractMatches(
 		sourceStartByte, sourceStartPosition := leadingCommentStart(sourceNode, source)
 		end := unitNode.EndPosition()
 		units = append(units, CodeUnit{
-			Kind:      kind,
-			Name:      nameNode.Utf8Text(source),
-			Language:  spec.name,
-			Path:      path,
-			Source:    string(source[sourceStartByte:unitNode.EndByte()]),
-			StartLine: sourceStartPosition.Row + 1,
-			EndLine:   end.Row + 1,
-			StartByte: sourceStartByte,
-			EndByte:   unitNode.EndByte(),
+			Kind:        kind,
+			Name:        nameNode.Utf8Text(source),
+			Language:    spec.name,
+			Path:        path,
+			Source:      string(source[sourceStartByte:unitNode.EndByte()]),
+			StartLine:   sourceStartPosition.Row + 1,
+			EndLine:     end.Row + 1,
+			StartColumn: sourceStartPosition.Column,
+			EndColumn:   end.Column,
+			StartByte:   sourceStartByte,
+			EndByte:     unitNode.EndByte(),
 		})
 	}
 	return units, nil
+}
+
+func extractRegions(
+	root *tree_sitter.Node,
+	source []byte,
+	kinds map[string]struct{},
+) []Region {
+	regions := make([]Region, 0)
+	var walk func(*tree_sitter.Node)
+	walk = func(node *tree_sitter.Node) {
+		if _, ok := kinds[node.Kind()]; ok {
+			start := node.StartPosition()
+			end := node.EndPosition()
+			regions = append(regions, Region{
+				Category:    regionCategory(node.Kind()),
+				Kind:        node.Kind(),
+				Source:      node.Utf8Text(source),
+				StartLine:   start.Row + 1,
+				EndLine:     end.Row + 1,
+				StartColumn: start.Column,
+				EndColumn:   end.Column,
+				StartByte:   node.StartByte(),
+				EndByte:     node.EndByte(),
+			})
+		}
+		for index := uint(0); index < node.NamedChildCount(); index++ {
+			child := node.NamedChild(index)
+			if child != nil {
+				walk(child)
+			}
+		}
+	}
+	walk(root)
+	sort.SliceStable(regions, func(i, j int) bool {
+		if regions[i].StartByte == regions[j].StartByte {
+			return regions[i].EndByte < regions[j].EndByte
+		}
+		return regions[i].StartByte < regions[j].StartByte
+	})
+	return regions
+}
+
+func regionCategory(kind string) string {
+	switch kind {
+	case "comment", "line_comment", "block_comment":
+		return "comment"
+	case "field_declaration",
+		"field_definition",
+		"property_signature",
+		"public_field_definition":
+		return "field"
+	default:
+		return "statement"
+	}
 }
 
 func documentationAnchor(node *tree_sitter.Node) *tree_sitter.Node {
@@ -463,3 +548,68 @@ const rustImplQuery = `
 (impl_item
   type: (type_identifier) @name) @type
 `
+
+var javascriptRegionKinds = kindSet(
+	"comment",
+	"expression_statement",
+	"field_definition",
+	"lexical_declaration",
+	"public_field_definition",
+	"return_statement",
+	"throw_statement",
+	"variable_declaration",
+)
+
+var typescriptRegionKinds = kindSet(
+	"comment",
+	"expression_statement",
+	"field_definition",
+	"lexical_declaration",
+	"property_signature",
+	"public_field_definition",
+	"return_statement",
+	"throw_statement",
+	"variable_declaration",
+)
+
+var pythonRegionKinds = kindSet(
+	"assignment",
+	"assert_statement",
+	"augmented_assignment",
+	"comment",
+	"expression_statement",
+	"pass_statement",
+	"raise_statement",
+	"return_statement",
+)
+
+var goRegionKinds = kindSet(
+	"assignment_statement",
+	"comment",
+	"defer_statement",
+	"expression_statement",
+	"field_declaration",
+	"go_statement",
+	"inc_statement",
+	"return_statement",
+	"send_statement",
+	"short_var_declaration",
+	"var_declaration",
+)
+
+var rustRegionKinds = kindSet(
+	"block_comment",
+	"expression_statement",
+	"field_declaration",
+	"let_declaration",
+	"line_comment",
+	"return_expression",
+)
+
+func kindSet(kinds ...string) map[string]struct{} {
+	result := make(map[string]struct{}, len(kinds))
+	for _, kind := range kinds {
+		result[kind] = struct{}{}
+	}
+	return result
+}

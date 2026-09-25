@@ -82,6 +82,56 @@ func TestTypeSafeEvaluateBatchesRules(t *testing.T) {
 	}
 }
 
+func TestTypeSafeEvaluateExplainsRegionContext(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		var payload systemOneRequest
+		if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
+			t.Errorf("decode request: %v", err)
+		}
+		state, _ := payload.State.(map[string]any)
+		if state["source"] != "Enabled bool" {
+			t.Errorf("region source = %#v", state["source"])
+		}
+		if !strings.Contains(fmt.Sprint(state["parentSource"]), "type FeatureFlags") {
+			t.Errorf("parent source = %#v", state["parentSource"])
+		}
+		instructions := payload.Questions["database-joins"].Instructions
+		if !strings.Contains(instructions, "state.source") ||
+			!strings.Contains(instructions, "state.parentSource") {
+			t.Errorf("instructions = %q", instructions)
+		}
+		fmt.Fprint(writer, `{
+			"answers": {
+				"database-joins": {"type": "choice", "choice": "fail", "confidence": 1}
+			}
+		}`)
+	}))
+	defer server.Close()
+
+	client := newTestClient(t, server, nil)
+	batch := testBatch()
+	batch.Rules = batch.Rules[:1]
+	batch.CodeUnit = parsing.CodeUnit{
+		Kind:         parsing.CodeKindRegion,
+		Name:         "FeatureFlags:field_declaration",
+		Language:     "go",
+		Path:         "flags.go",
+		Source:       "Enabled bool",
+		ParentSource: "type FeatureFlags struct {\n\tEnabled bool\n}",
+		StartLine:    4,
+		EndLine:      4,
+	}
+	results, err := client.Evaluate(context.Background(), batch)
+	if err != nil {
+		t.Fatalf("Evaluate() error = %v", err)
+	}
+	if results["database-joins"].Status != StatusFail {
+		t.Fatalf("result = %#v", results["database-joins"])
+	}
+}
+
 func TestTypeSafeEvaluateRejectsMalformedAnswers(t *testing.T) {
 	t.Parallel()
 

@@ -13,7 +13,9 @@ func TestDecodeValidConfig(t *testing.T) {
 			"id": "database-joins",
 			"description": "Join related database records in the database.",
 			"severity": "error",
-			"include": ["**/*.go"]
+			"include": ["**/*.go"],
+			"kinds": ["function"],
+			"localize": ["statement"]
 		}]
 	}`))
 	if err != nil {
@@ -45,6 +47,22 @@ func TestDecodeRejectsInvalidConfig(t *testing.T) {
 		"trailing value": `{
 			"rules": [{"id": "one", "description": "A rule.", "severity": "info"}]
 		} {}`,
+		"invalid localization category": `{
+			"rules": [{
+				"id": "one",
+				"description": "A rule.",
+				"severity": "info",
+				"localize": ["banana"]
+			}]
+		}`,
+		"invalid code unit kind": `{
+			"rules": [{
+				"id": "one",
+				"description": "A rule.",
+				"severity": "info",
+				"kinds": ["banana"]
+			}]
+		}`,
 	}
 
 	for name, input := range tests {

@@ -1,6 +1,6 @@
-package violations
+package bad
 
 type FeatureFlags struct {
 	Enabled bool
-	Ready   bool
+	Sync    bool
 }
