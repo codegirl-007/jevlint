@@ -25,14 +25,15 @@ type Language struct {
 }
 
 type Rule struct {
-	ID          string       `json:"id"`
-	Description string       `json:"description"`
-	Severity    Severity     `json:"severity"`
-	Include     []string     `json:"include,omitempty"`
-	Exclude     []string     `json:"exclude,omitempty"`
-	Exceptions  []string     `json:"exceptions,omitempty"`
-	Kinds       []TargetKind `json:"kinds,omitempty"`
-	Localize    []TargetKind `json:"localize,omitempty"`
+	ID            string       `json:"id"`
+	Description   string       `json:"description"`
+	Severity      Severity     `json:"severity"`
+	Include       []string     `json:"include,omitempty"`
+	Exclude       []string     `json:"exclude,omitempty"`
+	Exceptions    []string     `json:"exceptions,omitempty"`
+	Kinds         []TargetKind `json:"kinds,omitempty"`
+	Localize      []TargetKind `json:"localize,omitempty"`
+	MinConfidence *float64     `json:"minConfidence,omitempty"`
 }
 
 type TargetKind int
@@ -203,6 +204,13 @@ func (cfg Config) MinimumConfidence() float64 {
 	return *cfg.MinConfidence
 }
 
+func (cfg Config) ConfidenceFloor(rule Rule) float64 {
+	if rule.MinConfidence != nil {
+		return *rule.MinConfidence
+	}
+	return cfg.MinimumConfidence()
+}
+
 func (cfg Config) Validate() error {
 	if err := validateLanguages(cfg.Languages); err != nil {
 		return err
@@ -239,6 +247,9 @@ func (cfg Config) Validate() error {
 		}
 		if err := validateRuleKinds(rule, prefix); err != nil {
 			return err
+		}
+		if err := validateMinConfidence(rule.MinConfidence); err != nil {
+			return fmt.Errorf("%s.minConfidence must be between 0 and 1", prefix)
 		}
 	}
 	return nil
