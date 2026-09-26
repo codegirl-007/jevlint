@@ -22,6 +22,8 @@ import (
 	"jevlint/internal/config"
 )
 
+var newQuery = tree_sitter.NewQuery
+
 type queryKind int
 
 const (
@@ -49,17 +51,21 @@ func NewExtractor(enabled map[string]config.Language) (*Extractor, error) {
 	sort.Strings(ids)
 
 	extractor := &Extractor{byExtension: make(map[string]languageSpec)}
+	compiled := make([]languageSpec, 0, len(ids))
 	for _, id := range ids {
 		preset, ok := presets[id]
 		if !ok {
+			closeLanguageQueries(compiled...)
 			return nil, fmt.Errorf("unknown language preset %q", id)
 		}
 		spec, extensions, err := configuredLanguage(preset, enabled[id])
 		if err != nil {
+			closeLanguageQueries(compiled...)
 			return nil, err
 		}
 		for _, extension := range extensions {
 			if existing, exists := extractor.byExtension[extension]; exists {
+				closeLanguageQueries(append(compiled, spec)...)
 				return nil, fmt.Errorf(
 					"language extension %q is assigned to both %q and %q",
 					extension,
@@ -69,8 +75,23 @@ func NewExtractor(enabled map[string]config.Language) (*Extractor, error) {
 			}
 			extractor.byExtension[extension] = spec
 		}
+		compiled = append(compiled, spec)
 	}
 	return extractor, nil
+}
+
+func closeLanguageQueries(specs ...languageSpec) {
+	for _, spec := range specs {
+		if spec.functionQuery != nil {
+			spec.functionQuery.Close()
+		}
+		if spec.typeQuery != nil {
+			spec.typeQuery.Close()
+		}
+		if spec.typeContextQuery != nil {
+			spec.typeContextQuery.Close()
+		}
+	}
 }
 
 func configuredLanguage(
@@ -190,7 +211,7 @@ func validateConfiguredQuery(
 	source string,
 	targetCapture string,
 ) (*tree_sitter.Query, error) {
-	query, queryError := tree_sitter.NewQuery(language, source)
+	query, queryError := newQuery(language, source)
 	if queryError != nil {
 		return nil, fmt.Errorf(
 			"compile %s %s query: %s",
