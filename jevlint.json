@@ -1,4 +1,5 @@
 {
+  "minConfidence": 0.8,
   "languages": {
     "c": {},
     "cpp": {},

@@ -491,6 +491,154 @@ func TestRunJobsCancelsPeersAfterError(t *testing.T) {
 	}
 }
 
+type scoredBooleanEvaluator struct {
+	calls            int
+	typeConfidence   float64
+	regionConfidence float64
+}
+
+func (evaluator *scoredBooleanEvaluator) Evaluate(
+	_ context.Context,
+	batch evaluation.Batch,
+) (map[string]evaluation.Result, error) {
+	evaluator.calls++
+	status := evaluation.StatusPass
+	confidence := 1.0
+	if batch.CodeUnit.Kind == parsing.CodeKindType {
+		status = evaluation.StatusFail
+		confidence = evaluator.typeConfidence
+	}
+	if batch.CodeUnit.Kind == parsing.CodeKindRegion &&
+		strings.HasPrefix(batch.CodeUnit.Source, "Flag") {
+		status = evaluation.StatusFail
+		confidence = evaluator.regionConfidence
+	}
+	return map[string]evaluation.Result{
+		"boolean-property-naming": {
+			Status:     status,
+			Confidence: confidence,
+		},
+	}, nil
+}
+
+func TestCheckSkipsFailsBelowMinConfidence(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	source := "package sample\n\n// FeatureFlags controls behavior.\n" +
+		"type FeatureFlags struct {\n\tFlag bool\n\tIsReady bool\n}\n\n" +
+		"func ReadFlags() {}\n"
+	if err := os.WriteFile(filepath.Join(root, "flags.go"), []byte(source), 0o600); err != nil {
+		t.Fatalf("write source: %v", err)
+	}
+
+	minimum := 0.8
+	cfg := config.Config{
+		MinConfidence: &minimum,
+		Rules: []config.Rule{{
+			ID:          "boolean-property-naming",
+			Description: "Boolean fields clearly describe the true state.",
+			Severity:    config.SeverityWarning,
+			Kinds:       []config.TargetKind{config.TargetKindType},
+			Localize:    []config.TargetKind{config.TargetKindField},
+		}},
+	}
+	weakFail := &scoredBooleanEvaluator{typeConfidence: 0.6, regionConfidence: 1}
+	report, err := (Runner{
+		Extractor: testGoExtractor(t),
+		Evaluator: weakFail,
+	}).Evaluate(context.Background(), cfg, Options{Root: root, Concurrency: 1})
+	if err != nil {
+		t.Fatalf("Check() error = %v", err)
+	}
+	if len(report.Findings) != 0 {
+		t.Fatalf("findings = %#v, want none below minConfidence", report.Findings)
+	}
+	if weakFail.calls != 1 {
+		t.Fatalf("evaluator calls = %d, want 1 type check and no localize", weakFail.calls)
+	}
+
+	strongFail := &scoredBooleanEvaluator{typeConfidence: 0.9, regionConfidence: 1}
+	report, err = (Runner{
+		Extractor: testGoExtractor(t),
+		Evaluator: strongFail,
+	}).Evaluate(context.Background(), cfg, Options{Root: root, Concurrency: 1})
+	if err != nil {
+		t.Fatalf("Check() error = %v", err)
+	}
+	if len(report.Findings) != 1 {
+		t.Fatalf("findings = %#v, want the fail at 0.9", report.Findings)
+	}
+	if strongFail.calls < 2 {
+		t.Fatalf("evaluator calls = %d, want localize after a qualifying fail", strongFail.calls)
+	}
+
+	report, err = (Runner{
+		Extractor: testGoExtractor(t),
+		Evaluator: lowConfidencePassEvaluator{},
+	}).Evaluate(context.Background(), cfg, Options{Root: root, Concurrency: 1})
+	if err != nil {
+		t.Fatalf("Check() error = %v", err)
+	}
+	if len(report.Findings) != 0 {
+		t.Fatalf("findings = %#v, want none for a low-confidence pass", report.Findings)
+	}
+}
+
+type lowConfidencePassEvaluator struct{}
+
+func (lowConfidencePassEvaluator) Evaluate(
+	_ context.Context,
+	batch evaluation.Batch,
+) (map[string]evaluation.Result, error) {
+	results := make(map[string]evaluation.Result, len(batch.Rules))
+	for _, rule := range batch.Rules {
+		results[rule.ID] = evaluation.Result{
+			Status:     evaluation.StatusPass,
+			Confidence: 0.1,
+		}
+	}
+	return results, nil
+}
+
+func TestCheckLocalizeIgnoresRegionFailsBelowMinConfidence(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	source := "package sample\n\n// FeatureFlags controls behavior.\n" +
+		"type FeatureFlags struct {\n\tFlag bool\n\tIsReady bool\n}\n\n" +
+		"func ReadFlags() {}\n"
+	if err := os.WriteFile(filepath.Join(root, "flags.go"), []byte(source), 0o600); err != nil {
+		t.Fatalf("write source: %v", err)
+	}
+
+	minimum := 0.8
+	cfg := config.Config{
+		MinConfidence: &minimum,
+		Rules: []config.Rule{{
+			ID:          "boolean-property-naming",
+			Description: "Boolean fields clearly describe the true state.",
+			Severity:    config.SeverityWarning,
+			Kinds:       []config.TargetKind{config.TargetKindType},
+			Localize:    []config.TargetKind{config.TargetKindField},
+		}},
+	}
+	evaluator := &scoredBooleanEvaluator{typeConfidence: 0.9, regionConfidence: 0.5}
+	report, err := (Runner{
+		Extractor: testGoExtractor(t),
+		Evaluator: evaluator,
+	}).Evaluate(context.Background(), cfg, Options{Root: root, Concurrency: 1})
+	if err != nil {
+		t.Fatalf("Check() error = %v", err)
+	}
+	if len(report.Findings) != 1 {
+		t.Fatalf("findings = %#v, want the parent fail", report.Findings)
+	}
+	if len(report.Findings[0].Locations) != 0 {
+		t.Fatalf("locations = %#v, want none below minConfidence", report.Findings[0].Locations)
+	}
+}
+
 func TestCheckLocalizesFailedRuleToTreeSitterRegion(t *testing.T) {
 	t.Parallel()
 

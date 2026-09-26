@@ -24,6 +24,35 @@ func TestDecodeValidConfig(t *testing.T) {
 	if len(cfg.Rules) != 1 || cfg.Rules[0].ID != "database-joins" {
 		t.Fatalf("Decode() rules = %#v", cfg.Rules)
 	}
+	if cfg.MinConfidence != nil {
+		t.Fatalf("Decode() minConfidence = %#v, want omitted", cfg.MinConfidence)
+	}
+}
+
+func TestDecodeMinConfidence(t *testing.T) {
+	t.Parallel()
+
+	zero, err := Decode(strings.NewReader(withGoLanguage(`{
+		"minConfidence": 0,
+		"rules": [{"id": "one", "description": "A rule.", "severity": "info"}]
+	}`)))
+	if err != nil {
+		t.Fatalf("Decode() error = %v", err)
+	}
+	if zero.MinConfidence == nil || *zero.MinConfidence != 0 {
+		t.Fatalf("Decode() minConfidence = %#v, want 0", zero.MinConfidence)
+	}
+
+	floor, err := Decode(strings.NewReader(withGoLanguage(`{
+		"minConfidence": 0.8,
+		"rules": [{"id": "one", "description": "A rule.", "severity": "info"}]
+	}`)))
+	if err != nil {
+		t.Fatalf("Decode() error = %v", err)
+	}
+	if floor.MinConfidence == nil || *floor.MinConfidence != 0.8 {
+		t.Fatalf("Decode() minConfidence = %#v, want 0.8", floor.MinConfidence)
+	}
 }
 
 func TestDecodeRejectsInvalidConfig(t *testing.T) {
@@ -86,6 +115,20 @@ func TestDecodeValidationErrors(t *testing.T) {
 		"empty rules": {
 			input: `{"rules": []}`,
 			want:  "config must contain at least one rule",
+		},
+		"minConfidence below zero": {
+			input: `{
+				"minConfidence": -0.1,
+				"rules": [{"id": "one", "description": "A rule.", "severity": "info"}]
+			}`,
+			want: "minConfidence must be between 0 and 1",
+		},
+		"minConfidence above one": {
+			input: `{
+				"minConfidence": 1.1,
+				"rules": [{"id": "one", "description": "A rule.", "severity": "info"}]
+			}`,
+			want: "minConfidence must be between 0 and 1",
 		},
 		"missing id takes precedence": {
 			input: `{"rules": [{
