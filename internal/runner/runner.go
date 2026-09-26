@@ -136,7 +136,7 @@ func (runner Runner) Evaluate(ctx context.Context, cfg config.Config, options Op
 		jobs,
 		setup.concurrency,
 		func(ctx context.Context, job evaluationJob) (evaluationOutcome, error) {
-			return evaluateJob(ctx, runner.Evaluator, job)
+			return evaluateJob(ctx, runner.Evaluator, job, cfg.MinimumConfidence())
 		},
 	)
 	if err != nil {
@@ -148,6 +148,7 @@ func (runner Runner) Evaluate(ctx context.Context, cfg config.Config, options Op
 		runner.Evaluator,
 		pending,
 		setup.concurrency,
+		cfg.MinimumConfidence(),
 	)
 	if err != nil {
 		return Report{}, err
@@ -551,6 +552,7 @@ func evaluateJob(
 	ctx context.Context,
 	evaluator evaluation.Evaluator,
 	job evaluationJob,
+	minConfidence float64,
 ) (evaluationOutcome, error) {
 	results, err := evaluator.Evaluate(ctx, evaluation.Batch{
 		Rules:    job.rules,
@@ -589,7 +591,8 @@ func evaluateJob(
 		}
 		outcome.evaluations++
 
-		if result.Status == evaluation.StatusPass {
+		if result.Status == evaluation.StatusPass ||
+			result.Confidence < minConfidence {
 			continue
 		}
 		outcome.findings = append(outcome.findings, pendingFinding{
@@ -636,6 +639,7 @@ func localizeFindings(
 	evaluator evaluation.Evaluator,
 	findings []pendingFinding,
 	concurrency int,
+	minConfidence float64,
 ) (int, error) {
 	jobs := localizationJobs(findings)
 	outcomes, err := runJobs(
@@ -643,7 +647,7 @@ func localizeFindings(
 		jobs,
 		concurrency,
 		func(ctx context.Context, job localizationJob) (localizationOutcome, error) {
-			return evaluateLocalizationJob(ctx, evaluator, job)
+			return evaluateLocalizationJob(ctx, evaluator, job, minConfidence)
 		},
 	)
 	if err != nil {
@@ -680,6 +684,7 @@ func evaluateLocalizationJob(
 	ctx context.Context,
 	evaluator evaluation.Evaluator,
 	job localizationJob,
+	minConfidence float64,
 ) (localizationOutcome, error) {
 	candidate := parsing.CodeUnit{
 		Kind:         parsing.CodeKindRegion,
@@ -729,7 +734,8 @@ func evaluateLocalizationJob(
 	}
 
 	outcome := localizationOutcome{findingIndex: job.findingIndex}
-	if result.Status == evaluation.StatusFail {
+	if result.Status == evaluation.StatusFail &&
+		result.Confidence >= minConfidence {
 		outcome.location = &Location{
 			Category:    job.region.Category.String(),
 			Kind:        string(job.region.Kind),
@@ -857,4 +863,3 @@ var ignoredDirectoryNames = map[string]struct{}{
 	"dist":         {},
 	"build":        {},
 }
-

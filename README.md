@@ -90,6 +90,8 @@ customize a preset, but it cannot load an arbitrary external grammar.
 - `localize`: `comment`, `field`, or `statement`. Omit the key or use `[]` to
   skip the second pass. Each matching region is another Jev request on a fail,
   up to 24 regions per function or type.
+- `minConfidence`: optional `0`–`1`. Omit or `0` uses every Jev result. Failures
+  below the minimum are not reported.
 
 ## How it works
 

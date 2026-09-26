@@ -11,8 +11,9 @@ import (
 )
 
 type Config struct {
-	Languages map[string]Language `json:"languages"`
-	Rules     []Rule              `json:"rules"`
+	Languages     map[string]Language `json:"languages"`
+	MinConfidence *float64            `json:"minConfidence,omitempty"`
+	Rules         []Rule              `json:"rules"`
 }
 
 type Language struct {
@@ -195,8 +196,18 @@ func Decode(reader io.Reader) (Config, error) {
 	return cfg, nil
 }
 
+func (cfg Config) MinimumConfidence() float64 {
+	if cfg.MinConfidence == nil {
+		return 0
+	}
+	return *cfg.MinConfidence
+}
+
 func (cfg Config) Validate() error {
 	if err := validateLanguages(cfg.Languages); err != nil {
+		return err
+	}
+	if err := validateMinConfidence(cfg.MinConfidence); err != nil {
 		return err
 	}
 	if len(cfg.Rules) == 0 {
@@ -229,6 +240,16 @@ func (cfg Config) Validate() error {
 		if err := validateRuleKinds(rule, prefix); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+func validateMinConfidence(value *float64) error {
+	if value == nil {
+		return nil
+	}
+	if *value < 0 || *value > 1 {
+		return errors.New("minConfidence must be between 0 and 1")
 	}
 	return nil
 }
