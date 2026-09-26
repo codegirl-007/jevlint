@@ -10,19 +10,16 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 
 	"jevlint/internal/changed"
 	"jevlint/internal/config"
 	"jevlint/internal/evaluation"
-	"jevlint/internal/fix"
 	"jevlint/internal/parsing"
 	"jevlint/internal/runner"
 )
 
 const usage = `Usage:
   jevlint check [flags] [paths...]
-  jevlint fix [flags] [paths...]
 
 Flags:
   --changed             check only git-modified files
@@ -33,7 +30,6 @@ Flags:
   --format text|json    output format (default "text")
   --no-cache            bypass evaluation cache reads and writes
   --refresh-cache       reevaluate and replace current cached results
-  --fix                 print findings, then apply a validated fix
 `
 
 const (
@@ -47,8 +43,6 @@ type cliCommand int
 const (
 	commandUnknown cliCommand = iota
 	commandCheck
-	commandFix
-	commandMCPCheck
 	commandHelp
 )
 
@@ -56,10 +50,6 @@ func parseCLICommand(name string) cliCommand {
 	switch name {
 	case "check":
 		return commandCheck
-	case "fix":
-		return commandFix
-	case "mcp-check":
-		return commandMCPCheck
 	case "-h", "--help":
 		return commandHelp
 	default:
@@ -71,10 +61,6 @@ func (command cliCommand) String() string {
 	switch command {
 	case commandCheck:
 		return "check"
-	case commandFix:
-		return "fix"
-	case commandMCPCheck:
-		return "mcp-check"
 	case commandHelp:
 		return "help"
 	default:
@@ -124,8 +110,8 @@ func parseColorMode(value string) (colorMode, bool) {
 }
 
 type terminalHints struct {
-	plainOutput   bool
-	dumbTerminal  bool
+	plainOutput  bool
+	dumbTerminal bool
 }
 
 func readTerminalHints(getenv func(string) string) terminalHints {
@@ -146,7 +132,7 @@ func Run(
 		fmt.Fprint(stderr, usage)
 		return exitUsageError
 	}
-	if dispatch := handleSpecialCommand(ctx, args[0], stdout, stderr, getenv); dispatch.handled {
+	if dispatch := handleSpecialCommand(args[0], stderr); dispatch.handled {
 		return dispatch.exitCode
 	}
 	options, exitCode, ready := parseRunOptions(parseCLICommand(args[0]), args[1:], stderr)
@@ -154,7 +140,7 @@ func Run(
 		return exitCode
 	}
 	options.output.hints = readTerminalHints(getenv)
-	return executeRun(ctx, options, stdout, stderr, os.UserCacheDir, getenv)
+	return executeRun(ctx, options, stdout, stderr, os.UserCacheDir)
 }
 
 type cacheMode int
@@ -183,10 +169,9 @@ func (mode cacheMode) shouldRefresh() bool {
 }
 
 type runOptions struct {
-	command cliCommand
-	paths   []string
-	output  outputContext
-	check   checkContext
+	paths  []string
+	output outputContext
+	check  checkContext
 }
 
 type outputContext struct {
@@ -198,7 +183,6 @@ type outputContext struct {
 type checkContext struct {
 	configPath  string
 	concurrency int
-	autoFix     bool
 	changed     bool
 	cache       cacheMode
 }
@@ -217,37 +201,19 @@ type commandDispatch struct {
 }
 
 func handleSpecialCommand(
-	ctx context.Context,
 	command string,
-	stdout io.Writer,
 	stderr io.Writer,
-	getenv func(string) string,
 ) commandDispatch {
 	switch parseCLICommand(command) {
-	case commandMCPCheck:
-		return commandDispatch{exitCode: runMCPCheck(ctx, stdout, stderr, getenv), handled: true}
 	case commandHelp:
 		fmt.Fprint(stderr, usage)
 		return commandDispatch{exitCode: exitSuccess, handled: true}
-	case commandCheck, commandFix:
+	case commandCheck:
 		return commandDispatch{exitCode: exitSuccess, handled: false}
 	default:
 		fmt.Fprintf(stderr, "jevlint: unknown command %q\n\n%s", command, usage)
 		return commandDispatch{exitCode: exitUsageError, handled: true}
 	}
-}
-
-func runMCPCheck(
-	ctx context.Context,
-	stdout io.Writer,
-	stderr io.Writer,
-	getenv func(string) string,
-) int {
-	if err := fix.ServeMCP(ctx, os.Stdin, stdout, getenv); err != nil {
-		fmt.Fprintf(stderr, "jevlint: mcp-check: %v\n", err)
-		return exitUsageError
-	}
-	return exitSuccess
 }
 
 func newRunFlagSet(command cliCommand, stderr io.Writer) *flag.FlagSet {
@@ -273,7 +239,6 @@ func parseRunOptions(
 	format := flags.String("format", "text", "output format")
 	noCache := flags.Bool("no-cache", false, "bypass evaluation cache")
 	refreshCache := flags.Bool("refresh-cache", false, "refresh cached evaluations")
-	autoFix := flags.Bool("fix", false, "print findings and apply a validated fix")
 	flagArgs, paths, err := splitFlagsAndPaths(flags, args)
 	if err != nil {
 		fmt.Fprintf(stderr, "jevlint: %v\n", err)
@@ -294,15 +259,11 @@ func parseRunOptions(
 	if !valid {
 		return runOptions{}, exitCode, false
 	}
-	bypass := *noCache || *autoFix
+	bypass := *noCache
 	var mode cacheMode
 	switch {
 	case bypass && *refreshCache:
-		if *autoFix && !*noCache {
-			fmt.Fprintln(stderr, "jevlint: --fix and --refresh-cache cannot be combined")
-		} else {
-			fmt.Fprintln(stderr, "jevlint: --no-cache and --refresh-cache cannot be combined")
-		}
+		fmt.Fprintln(stderr, "jevlint: --no-cache and --refresh-cache cannot be combined")
 		return runOptions{}, exitUsageError, false
 	case *clearCache && bypass:
 		mode = cacheClearAndBypass
@@ -318,8 +279,7 @@ func parseRunOptions(
 		mode = cacheReadWrite
 	}
 	return runOptions{
-		command: command,
-		paths:   paths,
+		paths: paths,
 		output: outputContext{
 			format: parsedFormat,
 			color:  parsedColor,
@@ -327,7 +287,6 @@ func parseRunOptions(
 		check: checkContext{
 			configPath:  *configPath,
 			concurrency: *concurrency,
-			autoFix:     *autoFix,
 			changed:     *changedFiles,
 			cache:       mode,
 		},
@@ -335,8 +294,8 @@ func parseRunOptions(
 }
 
 const (
-	defaultConfigFile        = "jevlint.json"
-	defaultCheckConcurrency  = 4
+	defaultConfigFile       = "jevlint.json"
+	defaultCheckConcurrency = 4
 )
 
 func validateRunOptions(
@@ -368,7 +327,6 @@ func executeRun(
 	stdout io.Writer,
 	stderr io.Writer,
 	userCacheDir func() (string, error),
-	getenv func(string) string,
 ) int {
 	options, exitCode, ready := applyChangedFilter(options, stderr)
 	if !ready {
@@ -386,7 +344,7 @@ func executeRun(
 	if exitCode != 0 {
 		return exitCode
 	}
-	return runLoaded(ctx, loaded, stdout, stderr, getenv)
+	return runLoaded(ctx, loaded, stdout, stderr)
 }
 
 func applyChangedFilter(
@@ -519,54 +477,18 @@ func runLoaded(
 	loaded loadedRun,
 	stdout io.Writer,
 	stderr io.Writer,
-	getenv func(string) string,
 ) int {
-	options := loaded.options
-	if options.command == commandFix || options.check.autoFix {
-		newFixProgress(
-			stderr,
-			shouldUseColor(options.output.color, stderr, options.output.hints),
-		).writeProgress("checking for findings")
-	}
 	report, err := runner.Runner{
 		Extractor: loaded.extractor,
 		Evaluator: loaded.evaluator,
 	}.Evaluate(ctx, loaded.cfg, runner.Options{
 		Root:        filepath.Dir(loaded.absoluteConfig),
-		Paths:       options.paths,
-		Concurrency: options.check.concurrency,
+		Paths:       loaded.options.paths,
+		Concurrency: loaded.options.check.concurrency,
 	})
 	if err != nil {
 		fmt.Fprintf(stderr, "jevlint: %v\n", err)
 		return exitUsageError
-	}
-	return reportCheckResult(ctx, loaded, stdout, stderr, report, getenv)
-}
-
-func reportCheckResult(
-	ctx context.Context,
-	loaded loadedRun,
-	stdout io.Writer,
-	stderr io.Writer,
-	report runner.Report,
-	getenv func(string) string,
-) int {
-	if loaded.options.check.autoFix {
-		return completeAutoFix(ctx, loaded, stdout, stderr, report, getenv)
-	}
-	if loaded.options.command == commandFix {
-		return runFix(
-			ctx,
-			stdout,
-			stderr,
-			loaded.cfg,
-			loaded.absoluteConfig,
-			loaded.extractor,
-			report,
-			loaded.options.check.concurrency,
-			loaded.options.output,
-			getenv,
-		)
 	}
 	if exitCode := writeReportOrFail(
 		stdout,
@@ -582,41 +504,6 @@ func reportCheckResult(
 	return exitSuccess
 }
 
-func completeAutoFix(
-	ctx context.Context,
-	loaded loadedRun,
-	stdout io.Writer,
-	stderr io.Writer,
-	report runner.Report,
-	getenv func(string) string,
-) int {
-	if loaded.options.output.format == formatText || !report.HasFailures() {
-		if exitCode := writeReportOrFail(
-			stdout,
-			stderr,
-			report,
-			loaded.options.output,
-		); exitCode != 0 {
-			return exitCode
-		}
-	}
-	if !report.HasFailures() {
-		return exitSuccess
-	}
-	return runFix(
-		ctx,
-		stdout,
-		stderr,
-		loaded.cfg,
-		loaded.absoluteConfig,
-		loaded.extractor,
-		report,
-		loaded.options.check.concurrency,
-		loaded.options.output,
-		getenv,
-	)
-}
-
 func writeReportOrFail(
 	stdout io.Writer,
 	stderr io.Writer,
@@ -628,297 +515,6 @@ func writeReportOrFail(
 		return exitUsageError
 	}
 	return exitSuccess
-}
-
-type fixOutput struct {
-	Validated     bool             `json:"validated"`
-	Applied       bool             `json:"applied"`
-	ModifiedFiles []string         `json:"modifiedFiles"`
-	Findings      []runner.Finding `json:"findings"`
-	Diff          string           `json:"diff,omitempty"`
-}
-
-type rejectedFixError struct {
-	message string
-}
-
-func (fixError rejectedFixError) Error() string {
-	return fixError.message
-}
-
-func runFix(
-	ctx context.Context,
-	stdout io.Writer,
-	stderr io.Writer,
-	cfg config.Config,
-	configPath string,
-	extractor *parsing.Extractor,
-	report runner.Report,
-	concurrency int,
-	output outputContext,
-	getenv func(string) string,
-) int {
-	if cfg.Fix == nil {
-		fmt.Fprintln(stderr, "jevlint: fix.command is required for the fix command")
-		return exitUsageError
-	}
-	if !report.HasFailures() {
-		if err := writeReport(stdout, report, output); err != nil {
-			fmt.Fprintf(stderr, "jevlint: write output: %v\n", err)
-			return exitUsageError
-		}
-		return exitSuccess
-	}
-
-	progress := newFixProgress(stderr, shouldUseColor(output.color, stderr, output.hints))
-	proposal, err := prepareFixProposal(
-		ctx,
-		cfg,
-		configPath,
-		extractor,
-		report,
-		progress.writeProgress,
-		progress.agentMessage,
-		progress.toolActivity,
-	)
-	progress.mu.Lock()
-	progress.finishAgentMessageLocked()
-	progress.mu.Unlock()
-	if err != nil {
-		return reportFixPreparationError(stderr, err)
-	}
-	progress.writeProgress("validating proposed changes with Jev")
-	overlay := make(map[string][]byte, len(proposal.Changes))
-	for _, change := range proposal.Changes {
-		overlay[change.Path] = change.After
-	}
-	validationEvaluator, err := evaluation.NewTypeSafeFromEnvWithOptions(
-		evaluation.TypeSafeOptions{},
-		getenv,
-	)
-	if err != nil {
-		fmt.Fprintf(stderr, "jevlint: validate fix: %v\n", err)
-		return exitUsageError
-	}
-	validation, err := (runner.Runner{
-		Extractor: extractor,
-		Evaluator: validationEvaluator,
-	}).Evaluate(ctx, cfg, runner.Options{
-		Root:          filepath.Dir(configPath),
-		Paths:         findingPaths(report.Findings),
-		Concurrency:   concurrency,
-		SourceOverlay: overlay,
-	})
-	if err != nil {
-		fmt.Fprintf(stderr, "jevlint: validate fix: %v\n", err)
-		return exitUsageError
-	}
-	return finishFix(
-		stdout,
-		stderr,
-		proposal,
-		validation,
-		output,
-		filepath.Dir(configPath),
-	)
-}
-
-func prepareFixProposal(
-	ctx context.Context,
-	cfg config.Config,
-	configPath string,
-	extractor *parsing.Extractor,
-	report runner.Report,
-	progress func(string),
-	agentMessage func(string),
-	toolActivity func(string),
-) (fix.Proposal, error) {
-	proposal, err := fix.Generate(ctx, fix.Options{
-		Workspace: fix.Workspace{
-			Root:       filepath.Dir(configPath),
-			ConfigPath: configPath,
-			Paths: fix.PathFilter{
-				Context: cfg.Fix.Context,
-				Exclude: cfg.Fix.Exclude,
-			},
-		},
-		Agent: fix.AgentSession{
-			Command: cfg.Fix.Command,
-			Feedback: fix.AgentFeedback{
-				Progress: progress,
-				Message:  agentMessage,
-				Tool:     toolActivity,
-			},
-		},
-		Findings: report.Findings,
-	})
-	if err != nil {
-		return fix.Proposal{}, err
-	}
-	if len(proposal.Changes) == 0 {
-		return fix.Proposal{}, rejectedFixError{
-			message: "ACP agent made no source changes",
-		}
-	}
-	if err := fix.ValidateSyntax(extractor, proposal.Changes); err != nil {
-		if restoreErr := fix.RestoreChanges(
-			filepath.Dir(configPath),
-			proposal.Changes,
-		); restoreErr != nil {
-			return fix.Proposal{}, fmt.Errorf(
-				"proposed fix has invalid syntax: %w (restore failed: %v)",
-				err,
-				restoreErr,
-			)
-		}
-		return fix.Proposal{}, rejectedFixError{
-			message: "proposed fix has invalid syntax: " + err.Error(),
-		}
-	}
-	return proposal, nil
-}
-
-func reportFixPreparationError(stderr io.Writer, err error) int {
-	var rejection rejectedFixError
-	if errors.As(err, &rejection) {
-		fmt.Fprintf(stderr, "jevlint: %s\n", rejection.message)
-		return exitHasFindings
-	}
-	fmt.Fprintf(stderr, "jevlint: generate fix: %v\n", err)
-	return exitUsageError
-}
-
-func finishFix(
-	stdout io.Writer,
-	stderr io.Writer,
-	proposal fix.Proposal,
-	validation runner.Report,
-	output outputContext,
-	projectRoot string,
-) int {
-	if validation.HasFailures() {
-		if err := fix.RestoreChanges(projectRoot, proposal.Changes); err != nil {
-			fmt.Fprintf(stderr, "jevlint: restore rejected fix: %v\n", err)
-			return exitUsageError
-		}
-		return writeRejectedFix(
-			stdout,
-			stderr,
-			proposal,
-			validation,
-			output,
-		)
-	}
-	if err := writeFixOutput(
-		stdout,
-		fixOutput{
-			Validated:     true,
-			Applied:       true,
-			ModifiedFiles: proposalPaths(proposal),
-			Findings:      []runner.Finding{},
-		},
-		output,
-	); err != nil {
-		fmt.Fprintf(stderr, "jevlint: write output: %v\n", err)
-		return exitUsageError
-	}
-	return exitSuccess
-}
-
-func writeRejectedFix(
-	stdout io.Writer,
-	stderr io.Writer,
-	proposal fix.Proposal,
-	validation runner.Report,
-	output outputContext,
-) int {
-	if err := writeFixOutput(
-		stdout,
-		fixOutput{
-			ModifiedFiles: proposalPaths(proposal),
-			Findings:      validation.Findings,
-		},
-		output,
-	); err != nil {
-		fmt.Fprintf(stderr, "jevlint: write output: %v\n", err)
-		return exitUsageError
-	}
-	fmt.Fprintln(stderr, "jevlint: proposed fix did not resolve every finding")
-	return exitHasFindings
-}
-
-func findingPaths(findings []runner.Finding) []string {
-	seen := make(map[string]struct{})
-	paths := make([]string, 0)
-	for _, finding := range findings {
-		if _, ok := seen[finding.Path]; ok {
-			continue
-		}
-		seen[finding.Path] = struct{}{}
-		paths = append(paths, finding.Path)
-	}
-	return paths
-}
-
-func proposalPaths(proposal fix.Proposal) []string {
-	paths := make([]string, 0, len(proposal.Changes))
-	for _, change := range proposal.Changes {
-		paths = append(paths, change.Path)
-	}
-	return paths
-}
-
-func writeFixOutput(
-	writer io.Writer,
-	output fixOutput,
-	outputCtx outputContext,
-) error {
-	if outputCtx.format == formatJSON {
-		encoder := json.NewEncoder(writer)
-		encoder.SetIndent("", "  ")
-		return encoder.Encode(output)
-	}
-	style := outputStyle{color: shouldUseColor(outputCtx.color, writer, outputCtx.hints)}
-	if !output.Validated {
-		fmt.Fprintf(
-			writer,
-			"\n  %s %s\n\n",
-			style.paint("1;33", "!"),
-			style.paint("1;33", "Proposed changes (rejected)"),
-		)
-		writeModifiedFiles(writer, style, output.ModifiedFiles)
-		fmt.Fprintf(writer, "%s\n", style.paint("1", "Validation feedback"))
-		for _, finding := range output.Findings {
-			writeFinding(writer, style, finding)
-		}
-		writeSummary(writer, style, output.Findings)
-		return nil
-	}
-	heading := "Validated proposed changes"
-	if output.Applied {
-		heading = "Applied proposed changes"
-	}
-	fmt.Fprintf(
-		writer,
-		"\n  %s %s\n\n",
-		style.paint("1;32", "✓"),
-		style.paint("1;32", heading),
-	)
-	writeModifiedFiles(writer, style, output.ModifiedFiles)
-	return nil
-}
-
-func writeModifiedFiles(writer io.Writer, style outputStyle, paths []string) {
-	fmt.Fprintln(writer, style.paint("1", "Modified files"))
-	for _, path := range paths {
-		fmt.Fprintf(
-			writer,
-			"  %s %s\n",
-			style.paint("33", "M"),
-			style.paint("36", path),
-		)
-	}
-	fmt.Fprintln(writer)
 }
 
 func writeReport(
@@ -938,103 +534,6 @@ func writeReport(
 	writeSummary(writer, style, report.Findings)
 	writeReportTotals(writer, report)
 	return nil
-}
-
-type fixProgress struct {
-	writer         io.Writer
-	style          outputStyle
-	mu             sync.Mutex
-	agentActive    bool
-	agentLineStart bool
-}
-
-func newFixProgress(writer io.Writer, color bool) *fixProgress {
-	return &fixProgress{
-		writer: writer,
-		style:  outputStyle{color: color},
-	}
-}
-
-func (progress *fixProgress) writeProgress(message string) {
-	progress.mu.Lock()
-	defer progress.mu.Unlock()
-	progress.finishAgentMessageLocked()
-	fmt.Fprintf(
-		progress.writer,
-		"  %s %s\n",
-		progress.style.paint("36", "◆"),
-		progressLabel(message),
-	)
-}
-
-func (progress *fixProgress) toolActivity(message string) {
-	progress.mu.Lock()
-	defer progress.mu.Unlock()
-	progress.finishAgentMessageLocked()
-	fmt.Fprintf(
-		progress.writer,
-		"  %s %s\n",
-		progress.style.paint("36", "↳"),
-		message,
-	)
-}
-
-func (progress *fixProgress) agentMessage(message string) {
-	if message == "" {
-		return
-	}
-	progress.mu.Lock()
-	defer progress.mu.Unlock()
-	if !progress.agentActive {
-		fmt.Fprintf(
-			progress.writer,
-			"\n  %s\n",
-			progress.style.paint("1;35", "Agent"),
-		)
-		progress.agentActive = true
-		progress.agentLineStart = true
-	}
-	progress.writeAgentChunk(message)
-}
-
-func (progress *fixProgress) finishAgentMessageLocked() {
-	if !progress.agentActive {
-		return
-	}
-	if !progress.agentLineStart {
-		fmt.Fprintln(progress.writer)
-	}
-	fmt.Fprintln(progress.writer)
-	progress.agentActive = false
-	progress.agentLineStart = false
-}
-
-func (progress *fixProgress) writeAgentChunk(message string) {
-	for message != "" {
-		if progress.agentLineStart {
-			fmt.Fprintf(
-				progress.writer,
-				"  %s ",
-				progress.style.paint("35", "│"),
-			)
-			progress.agentLineStart = false
-		}
-		newline := strings.IndexByte(message, '\n')
-		if newline < 0 {
-			fmt.Fprint(progress.writer, message)
-			return
-		}
-		fmt.Fprintln(progress.writer, message[:newline])
-		progress.agentLineStart = true
-		message = message[newline+1:]
-	}
-}
-
-func progressLabel(message string) string {
-	if message == "" {
-		return ""
-	}
-	return strings.ToUpper(message[:1]) + message[1:]
 }
 
 func writeFinding(writer io.Writer, style outputStyle, finding runner.Finding) {
@@ -1263,4 +762,3 @@ func flagName(arg string) (string, bool) {
 	}
 	return name, inline
 }
-
