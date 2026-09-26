@@ -255,6 +255,27 @@ func TestExtractRejectsInvalidInput(t *testing.T) {
 	}
 }
 
+func TestExtractReusesCompiledQueries(t *testing.T) {
+	t.Parallel()
+
+	extractor := testExtractor(t, "go")
+	source := []byte("package sample\n\nfunc Read() {}\n")
+	first, err := extractor.Extract("sample.go", source)
+	if err != nil {
+		t.Fatalf("first Extract() error = %v", err)
+	}
+	second, err := extractor.Extract("sample.go", source)
+	if err != nil {
+		t.Fatalf("second Extract() error = %v", err)
+	}
+	if len(first) == 0 || len(second) != len(first) {
+		t.Fatalf("Extract() units = %d then %d", len(first), len(second))
+	}
+	if first[0].Name != second[0].Name {
+		t.Fatalf("Extract() names = %q then %q", first[0].Name, second[0].Name)
+	}
+}
+
 func TestLanguagePresetsCompile(t *testing.T) {
 	t.Parallel()
 

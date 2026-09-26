@@ -107,45 +107,52 @@ func configuredLanguage(
 		return languageSpec{}, nil, err
 	}
 
-	spec := languageSpec{
-		name:             preset.name,
-		id:               languageID,
-		language:         preset.language,
-		functionQuery:    strings.Join(functionQueries, "\n\n"),
-		typeQuery:        strings.Join(typeQueries, "\n\n"),
-		typeContextQuery: strings.Join(typeContextQueries, "\n\n"),
-		regionKinds:      regionKinds,
-	}
-	if err := validateConfiguredQuery(
+	functionQuery, err := validateConfiguredQuery(
 		preset.name,
 		"function",
-		spec.language,
-		spec.functionQuery,
+		preset.language,
+		strings.Join(functionQueries, "\n\n"),
 		"function",
-	); err != nil {
+	)
+	if err != nil {
 		return languageSpec{}, nil, err
 	}
-	if err := validateConfiguredQuery(
+	typeQuery, err := validateConfiguredQuery(
 		preset.name,
 		"type",
-		spec.language,
-		spec.typeQuery,
+		preset.language,
+		strings.Join(typeQueries, "\n\n"),
 		"type",
-	); err != nil {
+	)
+	if err != nil {
+		functionQuery.Close()
 		return languageSpec{}, nil, err
 	}
-	if spec.typeContextQuery != "" {
-		if err := validateConfiguredQuery(
+	var typeContextQuery *tree_sitter.Query
+	typeContextSource := strings.Join(typeContextQueries, "\n\n")
+	if typeContextSource != "" {
+		typeContextQuery, err = validateConfiguredQuery(
 			preset.name,
 			"type context",
-			spec.language,
-			spec.typeContextQuery,
+			preset.language,
+			typeContextSource,
 			"type",
-		); err != nil {
+		)
+		if err != nil {
+			functionQuery.Close()
+			typeQuery.Close()
 			return languageSpec{}, nil, err
 		}
 	}
-	return spec, extensions, nil
+	return languageSpec{
+		name:             preset.name,
+		id:               languageID,
+		language:         preset.language,
+		functionQuery:    functionQuery,
+		typeQuery:        typeQuery,
+		typeContextQuery: typeContextQuery,
+		regionKinds:      regionKinds,
+	}, extensions, nil
 }
 
 func mergeRegions(
@@ -182,24 +189,24 @@ func validateConfiguredQuery(
 	language *tree_sitter.Language,
 	source string,
 	targetCapture string,
-) error {
+) (*tree_sitter.Query, error) {
 	query, queryError := tree_sitter.NewQuery(language, source)
 	if queryError != nil {
-		return fmt.Errorf(
+		return nil, fmt.Errorf(
 			"compile %s %s query: %s",
 			languageName,
 			queryName,
 			queryError.Message,
 		)
 	}
-	defer query.Close()
 
 	captures := make(map[string]struct{}, len(query.CaptureNames()))
 	for _, capture := range query.CaptureNames() {
 		captures[capture] = struct{}{}
 	}
 	if _, ok := captures[targetCapture]; !ok {
-		return fmt.Errorf(
+		query.Close()
+		return nil, fmt.Errorf(
 			"%s %s query must capture @%s",
 			languageName,
 			queryName,
@@ -207,9 +214,10 @@ func validateConfiguredQuery(
 		)
 	}
 	if _, ok := captures["name"]; !ok {
-		return fmt.Errorf("%s %s query must capture @name", languageName, queryName)
+		query.Close()
+		return nil, fmt.Errorf("%s %s query must capture @name", languageName, queryName)
 	}
-	return nil
+	return query, nil
 }
 
 func languagePresets() map[string]languagePreset {
@@ -228,9 +236,9 @@ func languagePresets() map[string]languagePreset {
 	}
 	return map[string]languagePreset{
 		"javascript": {
-			name:            "javascript",
-			language:        tree_sitter.NewLanguage(tree_sitter_javascript.Language()),
-			extensions:      []string{".js", ".jsx", ".mjs", ".cjs"},
+			name:       "javascript",
+			language:   tree_sitter.NewLanguage(tree_sitter_javascript.Language()),
+			extensions: []string{".js", ".jsx", ".mjs", ".cjs"},
 			queries: languageQueries{
 				queryFunction: []string{javascriptFunctionQuery},
 				queryType:     []string{javascriptTypeQuery},
@@ -248,9 +256,9 @@ func languagePresets() map[string]languagePreset {
 			},
 		},
 		"typescript": {
-			name:            "typescript",
-			language:        tree_sitter.NewLanguage(tree_sitter_typescript.LanguageTypescript()),
-			extensions:      []string{".ts", ".mts", ".cts"},
+			name:       "typescript",
+			language:   tree_sitter.NewLanguage(tree_sitter_typescript.LanguageTypescript()),
+			extensions: []string{".ts", ".mts", ".cts"},
 			queries: languageQueries{
 				queryFunction: []string{javascriptFunctionQuery},
 				queryType:     []string{typescriptTypeQuery},
@@ -262,9 +270,9 @@ func languagePresets() map[string]languagePreset {
 			},
 		},
 		"tsx": {
-			name:            "tsx",
-			language:        tree_sitter.NewLanguage(tree_sitter_typescript.LanguageTSX()),
-			extensions:      []string{".tsx"},
+			name:       "tsx",
+			language:   tree_sitter.NewLanguage(tree_sitter_typescript.LanguageTSX()),
+			extensions: []string{".tsx"},
 			queries: languageQueries{
 				queryFunction: []string{javascriptFunctionQuery},
 				queryType:     []string{typescriptTypeQuery},
@@ -276,9 +284,9 @@ func languagePresets() map[string]languagePreset {
 			},
 		},
 		"python": {
-			name:            "python",
-			language:        tree_sitter.NewLanguage(tree_sitter_python.Language()),
-			extensions:      []string{".py"},
+			name:       "python",
+			language:   tree_sitter.NewLanguage(tree_sitter_python.Language()),
+			extensions: []string{".py"},
 			queries: languageQueries{
 				queryFunction: []string{pythonFunctionQuery},
 				queryType:     []string{pythonTypeQuery},
@@ -297,9 +305,9 @@ func languagePresets() map[string]languagePreset {
 			},
 		},
 		"go": {
-			name:            "go",
-			language:        tree_sitter.NewLanguage(tree_sitter_go.Language()),
-			extensions:      []string{".go"},
+			name:       "go",
+			language:   tree_sitter.NewLanguage(tree_sitter_go.Language()),
+			extensions: []string{".go"},
 			queries: languageQueries{
 				queryFunction: []string{goFunctionQuery},
 				queryType:     []string{goTypeQuery},
@@ -321,12 +329,12 @@ func languagePresets() map[string]languagePreset {
 			},
 		},
 		"rust": {
-			name:               "rust",
-			language:           tree_sitter.NewLanguage(tree_sitter_rust.Language()),
-			extensions:         []string{".rs"},
+			name:       "rust",
+			language:   tree_sitter.NewLanguage(tree_sitter_rust.Language()),
+			extensions: []string{".rs"},
 			queries: languageQueries{
-				queryFunction:   []string{rustFunctionQuery},
-				queryType:       []string{rustTypeQuery},
+				queryFunction:    []string{rustFunctionQuery},
+				queryType:        []string{rustTypeQuery},
 				queryTypeContext: []string{rustImplQuery},
 			},
 			regions: map[CodeKind][]string{
@@ -340,9 +348,9 @@ func languagePresets() map[string]languagePreset {
 			},
 		},
 		"java": {
-			name:            "java",
-			language:        tree_sitter.NewLanguage(tree_sitter_java.Language()),
-			extensions:      []string{".java"},
+			name:       "java",
+			language:   tree_sitter.NewLanguage(tree_sitter_java.Language()),
+			extensions: []string{".java"},
 			queries: languageQueries{
 				queryFunction: []string{javaFunctionQuery},
 				queryType:     []string{javaTypeQuery},
@@ -360,9 +368,9 @@ func languagePresets() map[string]languagePreset {
 			},
 		},
 		"csharp": {
-			name:            "csharp",
-			language:        tree_sitter.NewLanguage(tree_sitter_c_sharp.Language()),
-			extensions:      []string{".cs"},
+			name:       "csharp",
+			language:   tree_sitter.NewLanguage(tree_sitter_c_sharp.Language()),
+			extensions: []string{".cs"},
 			queries: languageQueries{
 				queryFunction: []string{csharpFunctionQuery},
 				queryType:     []string{csharpTypeQuery},
@@ -384,9 +392,9 @@ func languagePresets() map[string]languagePreset {
 			},
 		},
 		"ruby": {
-			name:            "ruby",
-			language:        tree_sitter.NewLanguage(tree_sitter_ruby.Language()),
-			extensions:      []string{".rb", ".rake", ".gemspec"},
+			name:       "ruby",
+			language:   tree_sitter.NewLanguage(tree_sitter_ruby.Language()),
+			extensions: []string{".rb", ".rake", ".gemspec"},
 			queries: languageQueries{
 				queryFunction: []string{rubyFunctionQuery},
 				queryType:     []string{rubyTypeQuery},
@@ -398,9 +406,9 @@ func languagePresets() map[string]languagePreset {
 			},
 		},
 		"php": {
-			name:            "php",
-			language:        tree_sitter.NewLanguage(tree_sitter_php.LanguagePHP()),
-			extensions:      []string{".php", ".phtml"},
+			name:       "php",
+			language:   tree_sitter.NewLanguage(tree_sitter_php.LanguagePHP()),
+			extensions: []string{".php", ".phtml"},
 			queries: languageQueries{
 				queryFunction: []string{phpFunctionQuery},
 				queryType:     []string{phpTypeQuery},
@@ -417,9 +425,9 @@ func languagePresets() map[string]languagePreset {
 			},
 		},
 		"kotlin": {
-			name:            "kotlin",
-			language:        tree_sitter.NewLanguage(tree_sitter_kotlin.Language()),
-			extensions:      []string{".kt", ".kts"},
+			name:       "kotlin",
+			language:   tree_sitter.NewLanguage(tree_sitter_kotlin.Language()),
+			extensions: []string{".kt", ".kts"},
 			queries: languageQueries{
 				queryFunction: []string{kotlinFunctionQuery},
 				queryType:     []string{kotlinTypeQuery},
@@ -431,9 +439,9 @@ func languagePresets() map[string]languagePreset {
 			},
 		},
 		"c": {
-			name:            "c",
-			language:        tree_sitter.NewLanguage(tree_sitter_c.Language()),
-			extensions:      []string{".c"},
+			name:       "c",
+			language:   tree_sitter.NewLanguage(tree_sitter_c.Language()),
+			extensions: []string{".c"},
 			queries: languageQueries{
 				queryFunction: []string{cFunctionQuery},
 				queryType:     []string{cTypeQuery},
@@ -450,9 +458,9 @@ func languagePresets() map[string]languagePreset {
 			},
 		},
 		"cpp": {
-			name:            "cpp",
-			language:        tree_sitter.NewLanguage(tree_sitter_cpp.Language()),
-			extensions:      []string{".cc", ".cpp", ".cxx", ".h", ".hpp", ".hxx"},
+			name:       "cpp",
+			language:   tree_sitter.NewLanguage(tree_sitter_cpp.Language()),
+			extensions: []string{".cc", ".cpp", ".cxx", ".h", ".hpp", ".hxx"},
 			queries: languageQueries{
 				queryFunction: []string{cppFunctionQuery},
 				queryType:     []string{cppTypeQuery},

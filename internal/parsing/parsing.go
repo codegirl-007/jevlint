@@ -204,13 +204,13 @@ const maxAttachedRegions = 24
 type Region struct {
 	Category    CodeKind `json:"category"`
 	Kind        NodeKind `json:"kind"`
-	Source      string `json:"source"`
-	StartLine   uint   `json:"startLine"`
-	EndLine     uint   `json:"endLine"`
-	StartColumn uint   `json:"startColumn"`
-	EndColumn   uint   `json:"endColumn"`
-	StartByte   uint   `json:"startByte"`
-	EndByte     uint   `json:"endByte"`
+	Source      string   `json:"source"`
+	StartLine   uint     `json:"startLine"`
+	EndLine     uint     `json:"endLine"`
+	StartColumn uint     `json:"startColumn"`
+	EndColumn   uint     `json:"endColumn"`
+	StartByte   uint     `json:"startByte"`
+	EndByte     uint     `json:"endByte"`
 }
 
 type TypeDeclaration struct {
@@ -226,9 +226,9 @@ type languageSpec struct {
 	name             string
 	id               SourceLanguage
 	language         *tree_sitter.Language
-	functionQuery    string
-	typeQuery        string
-	typeContextQuery string
+	functionQuery    *tree_sitter.Query
+	typeQuery        *tree_sitter.Query
+	typeContextQuery *tree_sitter.Query
 	regionKinds      map[string]CodeKind
 }
 
@@ -340,7 +340,7 @@ func extractTypeDeclarations(
 			EndByte:   unit.EndByte,
 		})
 	}
-	if spec.typeContextQuery != "" {
+	if spec.typeContextQuery != nil {
 		contextTypes, err := extractMatches(
 			spec,
 			path,
@@ -410,16 +410,10 @@ func extractMatches(
 	path string,
 	source []byte,
 	root *tree_sitter.Node,
-	querySource string,
+	query *tree_sitter.Query,
 	captureName string,
 	kind CodeKind,
 ) ([]CodeUnit, error) {
-	query, queryError := tree_sitter.NewQuery(spec.language, querySource)
-	if queryError != nil {
-		return nil, fmt.Errorf("compile %s %s query: %s", spec.name, kind, queryError.Message)
-	}
-	defer query.Close()
-
 	cursor := tree_sitter.NewQueryCursor()
 	defer cursor.Close()
 

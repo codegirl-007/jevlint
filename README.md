@@ -29,7 +29,6 @@ go run ./cmd/jevlint check --refresh-cache .
 | `--config path` | Use a different rule file. Its directory becomes the project root. |
 | `--concurrency number` | Set the maximum number of concurrent Jev requests. Defaults to `4`. |
 | `--format text\|json` | Select human-readable or machine-readable output. Defaults to `text`. |
-| `--no-cache` | Bypass cache reads and writes for this run. |
 | `--refresh-cache` | Reevaluate code and replace matching cached results. |
 
 ```sh
@@ -118,9 +117,8 @@ create a new entry. Severity changes reuse the result because severity only
 affects reporting.
 
 Entries do not expire automatically. Because `jev-latest` can change without
-changing its name, use `--refresh-cache` for fresh model behavior. Use
-`--no-cache` to bypass caching or `--clear-cache` to clear this project's cache
-before a run.
+changing its name, use `--refresh-cache` to reevaluate and replace cached
+results. Use `--clear-cache` to clear this project's cache before a run.
 
 ## Supported languages
 
