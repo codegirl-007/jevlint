@@ -9,7 +9,10 @@ import (
 	"time"
 )
 
-const cacheEntryVersion = 1
+const (
+	cacheEntryVersion   = 1
+	cacheEntryExtension = ".json"
+)
 
 type ResultCache interface {
 	Get(string) (map[string]Result, bool)
@@ -27,8 +30,11 @@ type cacheEntry struct {
 	Results   map[string]Result `json:"results"`
 }
 
-func NewFileCache(projectRoot string) (*FileCache, error) {
-	userCache, err := os.UserCacheDir()
+func NewFileCache(
+	projectRoot string,
+	userCacheDir func() (string, error),
+) (*FileCache, error) {
+	userCache, err := userCacheDir()
 	if err != nil {
 		return nil, fmt.Errorf("resolve user cache directory: %w", err)
 	}
@@ -54,26 +60,48 @@ func newFileCacheAt(root string) (*FileCache, error) {
 }
 
 func (cache *FileCache) Get(key string) (map[string]Result, bool) {
-	path := cache.entryPath(key)
+	path := filepath.Join(cache.root, key+cacheEntryExtension)
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, false
 	}
-
-	var entry cacheEntry
-	if json.Unmarshal(data, &entry) != nil ||
-		entry.Version != cacheEntryVersion ||
-		len(entry.Results) == 0 ||
-		!validCachedResults(entry.Results) {
-		_ = os.Remove(path)
+	entry, err := decodeCacheEntry(data)
+	if err != nil {
+		if removeErr := os.Remove(path); removeErr != nil && !os.IsNotExist(removeErr) {
+			return nil, false
+		}
 		return nil, false
 	}
 	return cloneResults(entry.Results), true
 }
 
+func decodeCacheEntry(data []byte) (cacheEntry, error) {
+	var entry cacheEntry
+	if err := json.Unmarshal(data, &entry); err != nil {
+		return cacheEntry{}, fmt.Errorf("decode cache entry: %w", err)
+	}
+	if entry.Version != cacheEntryVersion {
+		return cacheEntry{}, fmt.Errorf("unsupported cache entry version %d", entry.Version)
+	}
+	if len(entry.Results) == 0 {
+		return cacheEntry{}, fmt.Errorf("invalid cache entry results")
+	}
+	for _, result := range entry.Results {
+		if err := result.Validate(); err != nil {
+			return cacheEntry{}, fmt.Errorf("invalid cache entry results")
+		}
+	}
+	return entry, nil
+}
+
 func (cache *FileCache) Put(key string, results map[string]Result) bool {
-	if len(results) == 0 || !validCachedResults(results) {
+	if len(results) == 0 {
 		return false
+	}
+	for _, result := range results {
+		if err := result.Validate(); err != nil {
+			return false
+		}
 	}
 	if err := cache.ensureRoot(); err != nil {
 		return false
@@ -86,10 +114,17 @@ func (cache *FileCache) Put(key string, results map[string]Result) bool {
 	if err != nil {
 		return false
 	}
+	return writeAtomicCacheFile(
+		cache.root,
+		filepath.Join(cache.root, key+cacheEntryExtension),
+		data,
+	) == nil
+}
 
-	temporary, err := os.CreateTemp(cache.root, ".write-*")
+func writeAtomicCacheFile(directory string, destination string, data []byte) error {
+	temporary, err := os.CreateTemp(directory, ".write-*")
 	if err != nil {
-		return false
+		return err
 	}
 	temporaryPath := temporary.Name()
 	succeeded := false
@@ -99,24 +134,23 @@ func (cache *FileCache) Put(key string, results map[string]Result) bool {
 			_ = os.Remove(temporaryPath)
 		}
 	}()
-
 	if err := temporary.Chmod(0o600); err != nil {
-		return false
+		return err
 	}
 	if _, err := temporary.Write(data); err != nil {
-		return false
+		return err
 	}
 	if err := temporary.Sync(); err != nil {
-		return false
+		return err
 	}
 	if err := temporary.Close(); err != nil {
-		return false
+		return err
 	}
-	if err := os.Rename(temporaryPath, cache.entryPath(key)); err != nil {
-		return false
+	if err := os.Rename(temporaryPath, destination); err != nil {
+		return err
 	}
 	succeeded = true
-	return true
+	return nil
 }
 
 func (cache *FileCache) Clear() error {
@@ -134,19 +168,6 @@ func (cache *FileCache) ensureRoot() error {
 		return fmt.Errorf("secure evaluation cache: %w", err)
 	}
 	return nil
-}
-
-func (cache *FileCache) entryPath(key string) string {
-	return filepath.Join(cache.root, key+".json")
-}
-
-func validCachedResults(results map[string]Result) bool {
-	for _, result := range results {
-		if result.Validate() != nil {
-			return false
-		}
-	}
-	return true
 }
 
 func cloneResults(results map[string]Result) map[string]Result {

@@ -10,7 +10,6 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"os"
 	"runtime"
 	"strconv"
 	"strings"
@@ -28,13 +27,24 @@ const (
 	defaultTimeout    = 10 * time.Second
 	defaultMaxRetries = 2
 	maxResponseBytes  = 1 << 20
-	cacheKeyVersion   = "typesafe-evaluation-v1"
+	cacheKeyVersion      = "typesafe-evaluation-v1"
+	answerTypeChoice     = "choice"
+	httpSuccessMin       = 200
+	httpSuccessLimit     = 300
+	retryBackoffBase     = 500 * time.Millisecond
+	retryBackoffCap      = 5 * time.Second
+	retryAfterHeaderMax  = time.Minute
+	criterionPass        = "The code complies with the rule, or an explicit exception applies."
+	criterionFail        = "The code violates the rule, and no explicit exception applies."
+	minimumBatchRules    = 1
 )
 
+type APIKey string
+type ServiceURL string
+
 type TypeSafeOptions struct {
-	APIKey     string
-	BaseURL    string
-	Model      string
+	APIKey     APIKey
+	BaseURL    ServiceURL
 	HTTPClient *http.Client
 	MaxRetries int
 	Sleep      func(context.Context, time.Duration) error
@@ -64,10 +74,43 @@ type systemOneRequest struct {
 	Questions map[string]question `json:"questions"`
 }
 
+type questionType int
+
+const (
+	questionTypeUnknown questionType = iota
+	questionTypeChoice
+)
+
+func (kind questionType) MarshalJSON() ([]byte, error) {
+	switch kind {
+	case questionTypeChoice:
+		return json.Marshal(answerTypeChoice)
+	default:
+		return nil, fmt.Errorf("unsupported question type")
+	}
+}
+
+func (kind *questionType) UnmarshalJSON(data []byte) error {
+	var value string
+	if err := json.Unmarshal(data, &value); err != nil {
+		return err
+	}
+	if value != answerTypeChoice {
+		return fmt.Errorf("unsupported question type %q", value)
+	}
+	*kind = questionTypeChoice
+	return nil
+}
+
+type questionCriteria struct {
+	Pass string `json:"pass"`
+	Fail string `json:"fail"`
+}
+
 type question struct {
-	Type         string            `json:"type"`
-	Instructions string            `json:"instructions"`
-	Criteria     map[string]string `json:"criteria"`
+	Type         questionType     `json:"type"`
+	Instructions string           `json:"instructions"`
+	Criteria     questionCriteria `json:"criteria"`
 }
 
 type systemOneResponse struct {
@@ -75,16 +118,9 @@ type systemOneResponse struct {
 }
 
 type choiceAnswer struct {
-	Type       string   `json:"type"`
-	Choice     string   `json:"choice"`
-	Confidence *float64 `json:"confidence"`
-}
-
-type attemptResponse struct {
-	body       []byte
-	header     http.Header
-	statusCode int
-	requestErr error
+	Type       questionType `json:"type"`
+	Choice     string       `json:"choice"`
+	Confidence *float64     `json:"confidence"`
 }
 
 type evaluationCall struct {
@@ -93,24 +129,37 @@ type evaluationCall struct {
 	err     error
 }
 
-func NewTypeSafeFromEnv() (*TypeSafe, error) {
-	return NewTypeSafeFromEnvWithOptions(TypeSafeOptions{})
-}
-
-func NewTypeSafeFromEnvWithOptions(options TypeSafeOptions) (*TypeSafe, error) {
-	options.APIKey = os.Getenv("TYPESAFE_API_KEY")
-	options.BaseURL = os.Getenv("TYPESAFE_BASE_URL")
-	options.Model = os.Getenv("TYPESAFE_DEFAULT_MODEL")
-	return NewTypeSafe(options)
+func NewTypeSafeFromEnvWithOptions(
+	options TypeSafeOptions,
+	getenv func(string) string,
+) (*TypeSafe, error) {
+	if getenv != nil {
+		if options.APIKey == "" {
+			options.APIKey = APIKey(getenv("TYPESAFE_API_KEY"))
+		}
+		if options.BaseURL == "" {
+			options.BaseURL = ServiceURL(getenv("TYPESAFE_BASE_URL"))
+		}
+	}
+	client, err := NewTypeSafe(options)
+	if err != nil {
+		return nil, err
+	}
+	if getenv != nil {
+		if model := strings.TrimSpace(getenv("TYPESAFE_DEFAULT_MODEL")); model != "" {
+			client.model = model
+		}
+	}
+	return client, nil
 }
 
 func NewTypeSafe(options TypeSafeOptions) (*TypeSafe, error) {
-	apiKey := strings.TrimSpace(options.APIKey)
+	apiKey := strings.TrimSpace(string(options.APIKey))
 	if apiKey == "" {
 		return nil, errors.New("TYPESAFE_API_KEY is required")
 	}
 
-	baseURL := strings.TrimRight(strings.TrimSpace(options.BaseURL), "/")
+	baseURL := strings.TrimRight(strings.TrimSpace(string(options.BaseURL)), "/")
 	if baseURL == "" {
 		baseURL = defaultBaseURL
 	}
@@ -119,10 +168,7 @@ func NewTypeSafe(options TypeSafeOptions) (*TypeSafe, error) {
 		return nil, fmt.Errorf("invalid TypeSafe base URL %q", baseURL)
 	}
 
-	model := strings.TrimSpace(options.Model)
-	if model == "" {
-		model = defaultModel
-	}
+	model := defaultModel
 
 	httpClient := options.HTTPClient
 	if httpClient == nil {
@@ -161,25 +207,27 @@ func (client *TypeSafe) Evaluate(ctx context.Context, batch Batch) (map[string]R
 		return nil, err
 	}
 	if client.cache == nil {
-		return client.evaluateBody(ctx, body, batch.Rules)
+		responseBody, err := client.perform(ctx, body)
+		if err != nil {
+			return nil, err
+		}
+		return decodeResults(responseBody, batch.Rules)
 	}
 
 	key := client.cacheKey(body)
-	if !client.refresh {
-		if results, ok := client.cachedResults(key, batch.Rules); ok {
-			client.cacheHits.Add(1)
-			return results, nil
-		}
+	if results, ok := client.hitCache(key, batch.Rules); ok {
+		return results, nil
 	}
 	return client.evaluateOnce(ctx, key, func() (map[string]Result, error) {
-		if !client.refresh {
-			if results, ok := client.cachedResults(key, batch.Rules); ok {
-				client.cacheHits.Add(1)
-				return results, nil
-			}
+		if results, ok := client.hitCache(key, batch.Rules); ok {
+			return results, nil
 		}
 		client.cacheMisses.Add(1)
-		results, err := client.evaluateBody(ctx, body, batch.Rules)
+		responseBody, err := client.perform(ctx, body)
+		if err != nil {
+			return nil, err
+		}
+		results, err := decodeResults(responseBody, batch.Rules)
 		if err != nil {
 			return nil, err
 		}
@@ -190,16 +238,16 @@ func (client *TypeSafe) Evaluate(ctx context.Context, batch Batch) (map[string]R
 	})
 }
 
-func (client *TypeSafe) evaluateBody(
-	ctx context.Context,
-	body []byte,
-	rules []config.Rule,
-) (map[string]Result, error) {
-	responseBody, err := client.perform(ctx, body)
-	if err != nil {
-		return nil, err
+func (client *TypeSafe) hitCache(key string, rules []config.Rule) (map[string]Result, bool) {
+	if client.refresh {
+		return nil, false
 	}
-	return decodeResults(responseBody, rules)
+	results, ok := client.cachedResults(key, rules)
+	if !ok {
+		return nil, false
+	}
+	client.cacheHits.Add(1)
+	return results, true
 }
 
 func (client *TypeSafe) cachedResults(
@@ -256,28 +304,10 @@ func (client *TypeSafe) CacheStats() CacheStats {
 }
 
 func (client *TypeSafe) requestBody(batch Batch) ([]byte, error) {
-	if len(batch.Rules) == 0 {
-		return nil, errors.New("at least one rule is required")
+	questions, err := questionsForBatch(batch)
+	if err != nil {
+		return nil, err
 	}
-
-	questions := make(map[string]question, len(batch.Rules))
-	for _, rule := range batch.Rules {
-		if _, exists := questions[rule.ID]; exists {
-			return nil, fmt.Errorf("duplicate rule id %q in evaluation batch", rule.ID)
-		}
-		questions[rule.ID] = question{
-			Type: "choice",
-			Instructions: instructionsFor(
-				rule,
-				batch.CodeUnit,
-			),
-			Criteria: map[string]string{
-				"pass": "The code complies with the rule, or an explicit exception applies.",
-				"fail": "The code violates the rule, and no explicit exception applies.",
-			},
-		}
-	}
-
 	body, err := json.Marshal(systemOneRequest{
 		Model:     client.model,
 		State:     batch.CodeUnit,
@@ -287,6 +317,27 @@ func (client *TypeSafe) requestBody(batch Batch) ([]byte, error) {
 		return nil, fmt.Errorf("encode TypeSafe request: %w", err)
 	}
 	return body, nil
+}
+
+func questionsForBatch(batch Batch) (map[string]question, error) {
+	if len(batch.Rules) < minimumBatchRules {
+		return nil, errors.New("at least one rule is required")
+	}
+	questions := make(map[string]question, len(batch.Rules))
+	for _, rule := range batch.Rules {
+		if _, exists := questions[rule.ID]; exists {
+			return nil, fmt.Errorf("duplicate rule id %q in evaluation batch", rule.ID)
+		}
+		questions[rule.ID] = question{
+			Type: questionTypeChoice,
+			Instructions: instructionsFor(rule, batch.CodeUnit),
+			Criteria: questionCriteria{
+				Pass: criterionPass,
+				Fail: criterionFail,
+			},
+		}
+	}
+	return questions, nil
 }
 
 func decodeResults(
@@ -307,11 +358,10 @@ func decodeResults(
 		if !ok {
 			return nil, fmt.Errorf("decode TypeSafe response: answer for rule %q is missing", rule.ID)
 		}
-		if answer.Type != "choice" {
+		if answer.Type != questionTypeChoice {
 			return nil, fmt.Errorf(
-				"decode TypeSafe response: answer for rule %q has type %q, want choice",
+				"decode TypeSafe response: answer for rule %q has unsupported type",
 				rule.ID,
-				answer.Type,
 			)
 		}
 		if answer.Confidence == nil {
@@ -321,8 +371,12 @@ func decodeResults(
 			)
 		}
 
+		status, err := ParseStatus(answer.Choice)
+		if err != nil {
+			return nil, fmt.Errorf("decode TypeSafe response: rule %q: %w", rule.ID, err)
+		}
 		result := Result{
-			Status:     Status(answer.Choice),
+			Status:     status,
 			Confidence: *answer.Confidence,
 		}
 		if err := result.Validate(); err != nil {
@@ -351,47 +405,37 @@ func (client *TypeSafe) cacheKey(body []byte) string {
 
 func (client *TypeSafe) perform(ctx context.Context, body []byte) ([]byte, error) {
 	for attempt := 0; ; attempt++ {
-		response, err := client.performAttempt(ctx, body, attempt)
+		request, err := client.newRequest(ctx, body, attempt)
 		if err != nil {
 			return nil, err
 		}
-		if response.requestErr != nil && ctx.Err() != nil {
-			return nil, ctx.Err()
+		response, err := client.httpClient.Do(request)
+		if err != nil {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			if attempt >= client.maxRetries {
+				return nil, fmt.Errorf("TypeSafe request failed: %w", err)
+			}
+			if sleepErr := client.sleep(ctx, retryDelay(attempt, nil)); sleepErr != nil {
+				return nil, sleepErr
+			}
+			continue
 		}
-		if response.succeeded() {
-			return response.body, nil
-		}
-		if attempt >= client.maxRetries || !response.retryable() {
-			return nil, response.err()
-		}
-		if err := client.sleep(ctx, retryDelay(attempt, response.header)); err != nil {
+		responseBody, err := readResponse(response)
+		if err != nil {
 			return nil, err
 		}
+		if response.StatusCode >= httpSuccessMin && response.StatusCode < httpSuccessLimit {
+			return responseBody, nil
+		}
+		if attempt >= client.maxRetries || !retryableStatus(response.StatusCode) {
+			return nil, responseError(response.StatusCode, response.Header, responseBody)
+		}
+		if sleepErr := client.sleep(ctx, retryDelay(attempt, response.Header)); sleepErr != nil {
+			return nil, sleepErr
+		}
 	}
-}
-
-func (client *TypeSafe) performAttempt(
-	ctx context.Context,
-	body []byte,
-	attempt int,
-) (attemptResponse, error) {
-	request, err := client.newRequest(ctx, body, attempt)
-	if err != nil {
-		return attemptResponse{}, err
-	}
-	response, err := client.httpClient.Do(request)
-	if err != nil {
-		return attemptResponse{requestErr: err}, nil
-	}
-	responseBody, err := readResponse(response)
-	if err != nil {
-		return attemptResponse{}, err
-	}
-	return attemptResponse{
-		body:       responseBody,
-		header:     response.Header,
-		statusCode: response.StatusCode,
-	}, nil
 }
 
 func (client *TypeSafe) newRequest(
@@ -432,23 +476,6 @@ func readResponse(response *http.Response) ([]byte, error) {
 	return body, nil
 }
 
-func (response attemptResponse) succeeded() bool {
-	return response.requestErr == nil &&
-		response.statusCode >= 200 &&
-		response.statusCode < 300
-}
-
-func (response attemptResponse) retryable() bool {
-	return response.requestErr != nil || retryableStatus(response.statusCode)
-}
-
-func (response attemptResponse) err() error {
-	if response.requestErr != nil {
-		return fmt.Errorf("TypeSafe request failed: %w", response.requestErr)
-	}
-	return responseError(response.statusCode, response.header, response.body)
-}
-
 func instructionsFor(
 	rule config.Rule,
 	unit parsing.CodeUnit,
@@ -484,7 +511,7 @@ func retryDelay(attempt int, headers http.Header) time.Duration {
 		if raw := headers.Get("retry-after-ms"); raw != "" {
 			if milliseconds, err := strconv.ParseFloat(raw, 64); err == nil && milliseconds >= 0 {
 				delay := time.Duration(milliseconds * float64(time.Millisecond))
-				if delay <= time.Minute {
+				if delay <= retryAfterHeaderMax {
 					return delay
 				}
 			}
@@ -492,16 +519,16 @@ func retryDelay(attempt int, headers http.Header) time.Duration {
 		if raw := headers.Get("Retry-After"); raw != "" {
 			if seconds, err := strconv.ParseFloat(raw, 64); err == nil && seconds >= 0 {
 				delay := time.Duration(seconds * float64(time.Second))
-				if delay <= time.Minute {
+				if delay <= retryAfterHeaderMax {
 					return delay
 				}
 			}
 		}
 	}
 
-	delay := 500 * time.Millisecond * time.Duration(1<<attempt)
-	if delay > 5*time.Second {
-		return 5 * time.Second
+	delay := retryBackoffBase * time.Duration(1<<attempt)
+	if delay > retryBackoffCap {
+		return retryBackoffCap
 	}
 	return delay
 }

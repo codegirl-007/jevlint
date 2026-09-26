@@ -15,15 +15,26 @@ import (
 	"jevlint/internal/scoping"
 )
 
+const defaultConcurrency = 4
+
+const (
+	codeUnitRankType = iota
+	codeUnitRankFunction
+	codeUnitRankComment
+	codeUnitRankField
+	codeUnitRankOther
+)
+
 type Runner struct {
 	Extractor *parsing.Extractor
 	Evaluator evaluation.Evaluator
 }
 
 type Options struct {
-	Root        string
-	Paths       []string
-	Concurrency int
+	Root          string
+	Paths         []string
+	Concurrency   int
+	SourceOverlay map[string][]byte
 }
 
 type Report struct {
@@ -32,6 +43,7 @@ type Report struct {
 	Evaluations  int                    `json:"evaluations"`
 	Cache        *evaluation.CacheStats `json:"cache,omitempty"`
 	Findings     []Finding              `json:"findings"`
+	SourcePaths  []string               `json:"-"`
 }
 
 type Finding struct {
@@ -90,13 +102,17 @@ type localizationOutcome struct {
 }
 
 type checkSetup struct {
-	root        string
-	paths       []string
-	concurrency int
+	root          string
+	paths         []string
+	concurrency   int
+	sourceOverlay map[string][]byte
 }
 
-func (runner Runner) Check(ctx context.Context, cfg config.Config, options Options) (Report, error) {
-	cacheBefore, hasCacheStats := evaluatorCacheStats(runner.Evaluator)
+func (runner Runner) Evaluate(ctx context.Context, cfg config.Config, options Options) (Report, error) {
+	cacheBefore, hasCacheStats := evaluation.CacheStats{}, false
+	if provider, ok := runner.Evaluator.(evaluation.CacheStatsProvider); ok {
+		cacheBefore, hasCacheStats = provider.CacheStats(), true
+	}
 	setup, err := runner.prepareCheck(options)
 	if err != nil {
 		return Report{}, err
@@ -105,11 +121,24 @@ func (runner Runner) Check(ctx context.Context, cfg config.Config, options Optio
 	if err != nil {
 		return Report{}, err
 	}
-	report, jobs, err := runner.planEvaluations(ctx, cfg, setup.root, files)
+	report, jobs, err := runner.planEvaluations(
+		ctx,
+		cfg,
+		setup.root,
+		files,
+		setup.sourceOverlay,
+	)
 	if err != nil {
 		return Report{}, err
 	}
-	outcomes, err := evaluateJobs(ctx, runner.Evaluator, jobs, setup.concurrency)
+	outcomes, err := runJobs(
+		ctx,
+		jobs,
+		setup.concurrency,
+		func(ctx context.Context, job evaluationJob) (evaluationOutcome, error) {
+			return evaluateJob(ctx, runner.Evaluator, job)
+		},
+	)
 	if err != nil {
 		return Report{}, err
 	}
@@ -124,23 +153,20 @@ func (runner Runner) Check(ctx context.Context, cfg config.Config, options Optio
 		return Report{}, err
 	}
 	report.Evaluations += localizationEvaluations
-	appendFindings(&report, pending)
+	for _, item := range pending {
+		report.Findings = append(report.Findings, item.finding)
+	}
 	if hasCacheStats {
-		cacheAfter, _ := evaluatorCacheStats(runner.Evaluator)
+		cacheAfter := evaluation.CacheStats{}
+		if provider, ok := runner.Evaluator.(evaluation.CacheStatsProvider); ok {
+			cacheAfter = provider.CacheStats()
+		}
 		cacheDelta := subtractCacheStats(cacheAfter, cacheBefore)
 		if cacheDelta.Hits+cacheDelta.Misses+cacheDelta.Writes > 0 {
 			report.Cache = &cacheDelta
 		}
 	}
 	return report, nil
-}
-
-func evaluatorCacheStats(evaluator evaluation.Evaluator) (evaluation.CacheStats, bool) {
-	provider, ok := evaluator.(evaluation.CacheStatsProvider)
-	if !ok {
-		return evaluation.CacheStats{}, false
-	}
-	return provider.CacheStats(), true
 }
 
 func subtractCacheStats(
@@ -166,7 +192,7 @@ func (runner Runner) prepareCheck(options Options) (checkSetup, error) {
 	}
 	concurrency := options.Concurrency
 	if concurrency == 0 {
-		concurrency = 4
+		concurrency = defaultConcurrency
 	}
 
 	root, err := filepath.Abs(options.Root)
@@ -177,7 +203,12 @@ func (runner Runner) prepareCheck(options Options) (checkSetup, error) {
 	if len(paths) == 0 {
 		paths = []string{"."}
 	}
-	return checkSetup{root: root, paths: paths, concurrency: concurrency}, nil
+	return checkSetup{
+		root:          root,
+		paths:         paths,
+		concurrency:   concurrency,
+		sourceOverlay: options.SourceOverlay,
+	}, nil
 }
 
 func (runner Runner) planEvaluations(
@@ -185,6 +216,7 @@ func (runner Runner) planEvaluations(
 	cfg config.Config,
 	root string,
 	files []string,
+	sourceOverlay map[string][]byte,
 ) (Report, []evaluationJob, error) {
 	report := Report{Findings: make([]Finding, 0)}
 	jobs := make([]evaluationJob, 0)
@@ -192,12 +224,22 @@ func (runner Runner) planEvaluations(
 		if err := ctx.Err(); err != nil {
 			return Report{}, nil, err
 		}
-		fileJobs, codeUnits, scanned, err := runner.planFile(cfg, root, file)
+		fileJobs, codeUnits, scanned, err := runner.planFile(
+			cfg,
+			root,
+			file,
+			sourceOverlay,
+		)
 		if err != nil {
 			return Report{}, nil, err
 		}
 		if scanned {
 			report.ScannedFiles++
+			relative, relErr := relativeProjectPath(root, file)
+			if relErr != nil {
+				return Report{}, nil, relErr
+			}
+			report.SourcePaths = append(report.SourcePaths, relative)
 		}
 		report.CodeUnits += codeUnits
 		jobs = append(jobs, fileJobs...)
@@ -209,44 +251,65 @@ func (runner Runner) planFile(
 	cfg config.Config,
 	root string,
 	file string,
+	sourceOverlay map[string][]byte,
 ) ([]evaluationJob, int, bool, error) {
-	relative, err := filepath.Rel(root, file)
-	if err != nil {
-		return nil, 0, false, fmt.Errorf(
-			"make %q relative to project root: %w",
-			file,
-			err,
-		)
-	}
-	relative = filepath.ToSlash(relative)
-	applicable, err := applicableRules(cfg.Rules, relative)
-	if err != nil || len(applicable) == 0 {
-		return nil, 0, false, err
-	}
-	source, err := os.ReadFile(file)
-	if err != nil {
-		return nil, 0, false, fmt.Errorf("read %q: %w", relative, err)
-	}
-	units, err := runner.Extractor.Extract(relative, source)
+	relative, err := relativeProjectPath(root, file)
 	if err != nil {
 		return nil, 0, false, err
 	}
-	units = unitsForRules(units, applicable)
-	return jobsForUnits(units, applicable), len(units), true, nil
-}
-
-func applicableRules(rules []config.Rule, path string) ([]config.Rule, error) {
-	applicable := make([]config.Rule, 0, len(rules))
-	for _, rule := range rules {
-		applies, err := scoping.Applies(rule, path)
+	applicable := make([]config.Rule, 0, len(cfg.Rules))
+	for _, rule := range cfg.Rules {
+		applies, err := scoping.Applies(rule, relative)
 		if err != nil {
-			return nil, err
+			return nil, 0, false, err
 		}
 		if applies {
 			applicable = append(applicable, rule)
 		}
 	}
-	return applicable, nil
+	if len(applicable) == 0 {
+		return nil, 0, false, nil
+	}
+	source, err := readOverlayOrFile(file, relative, sourceOverlay)
+	if err != nil {
+		return nil, 0, false, err
+	}
+	units, err := runner.Extractor.Extract(relative, source)
+	if err != nil {
+		return nil, 0, false, err
+	}
+	requested := requestedRegionKinds(applicable)
+	if len(requested) > 0 {
+		units = expandUnitsWithRegions(units, selectClosestRegions(units, requested))
+	}
+	return jobsForUnits(units, applicable), len(units), true, nil
+}
+
+func relativeProjectPath(root string, file string) (string, error) {
+	relative, err := filepath.Rel(root, file)
+	if err != nil {
+		return "", fmt.Errorf(
+			"make %q relative to project root: %w",
+			file,
+			err,
+		)
+	}
+	return filepath.ToSlash(relative), nil
+}
+
+func readOverlayOrFile(
+	file string,
+	relative string,
+	sourceOverlay map[string][]byte,
+) ([]byte, error) {
+	if source, ok := sourceOverlay[relative]; ok {
+		return source, nil
+	}
+	source, err := os.ReadFile(file)
+	if err != nil {
+		return nil, fmt.Errorf("read %q: %w", relative, err)
+	}
+	return source, nil
 }
 
 func jobsForUnits(units []parsing.CodeUnit, rules []config.Rule) []evaluationJob {
@@ -265,76 +328,93 @@ func jobsForUnits(units []parsing.CodeUnit, rules []config.Rule) []evaluationJob
 	return jobs
 }
 
-type regionIdentity struct {
-	category  string
-	kind      string
-	startByte uint
-	endByte   uint
-}
-
 type selectedRegion struct {
 	unit       parsing.CodeUnit
 	parentSpan uint
 }
 
-func unitsForRules(
+func selectClosestRegions(
 	units []parsing.CodeUnit,
-	rules []config.Rule,
+	requested map[parsing.CodeKind]parsing.CodeKind,
 ) []parsing.CodeUnit {
-	requested := requestedRegionKinds(rules)
-	if len(requested) == 0 {
-		return units
-	}
-
-	selected := make(map[regionIdentity]selectedRegion)
+	selected := make(map[parsing.Region]selectedRegion)
 	for _, parent := range units {
 		parentSpan := parent.EndByte - parent.StartByte
 		for _, region := range parent.Regions {
-			kind, ok := requested[region.Category]
-			if !ok {
-				continue
-			}
-			key := regionIdentity{
-				category:  region.Category,
-				kind:      region.Kind,
-				startByte: region.StartByte,
-				endByte:   region.EndByte,
-			}
-			existing, exists := selected[key]
-			if exists && existing.parentSpan <= parentSpan {
-				continue
-			}
-			selected[key] = selectedRegion{
-				unit:       regionCodeUnit(parent, region, kind),
-				parentSpan: parentSpan,
-			}
+			rememberClosestRegion(selected, parent, region, parentSpan, requested)
 		}
 	}
-
-	expanded := append([]parsing.CodeUnit(nil), units...)
+	regions := make([]parsing.CodeUnit, 0, len(selected))
 	for _, item := range selected {
-		expanded = append(expanded, item.unit)
+		regions = append(regions, item.unit)
 	}
+	return regions
+}
+
+func rememberClosestRegion(
+	selected map[parsing.Region]selectedRegion,
+	parent parsing.CodeUnit,
+	region parsing.Region,
+	parentSpan uint,
+	requested map[parsing.CodeKind]parsing.CodeKind,
+) {
+	kind, ok := requested[region.Category]
+	if !ok {
+		return
+	}
+	existing, exists := selected[region]
+	if exists && existing.parentSpan <= parentSpan {
+		return
+	}
+	selected[region] = selectedRegion{
+		unit:       regionCodeUnit(parent, region, kind),
+		parentSpan: parentSpan,
+	}
+}
+
+func expandUnitsWithRegions(
+	units []parsing.CodeUnit,
+	regions []parsing.CodeUnit,
+) []parsing.CodeUnit {
+	expanded := append([]parsing.CodeUnit(nil), units...)
+	expanded = append(expanded, regions...)
 	sort.SliceStable(expanded, func(i, j int) bool {
-		if expanded[i].StartByte == expanded[j].StartByte {
-			return codeKindRank(expanded[i].Kind) < codeKindRank(expanded[j].Kind)
-		}
-		return expanded[i].StartByte < expanded[j].StartByte
+		return codeUnitLess(expanded[i], expanded[j])
 	})
 	return expanded
 }
 
-func requestedRegionKinds(rules []config.Rule) map[string]parsing.CodeKind {
-	requested := make(map[string]parsing.CodeKind)
+func codeUnitLess(left parsing.CodeUnit, right parsing.CodeUnit) bool {
+	if left.StartByte != right.StartByte {
+		return left.StartByte < right.StartByte
+	}
+	rank := map[parsing.CodeKind]int{
+		parsing.CodeKindType:     codeUnitRankType,
+		parsing.CodeKindFunction: codeUnitRankFunction,
+		parsing.CodeKindComment:  codeUnitRankComment,
+		parsing.CodeKindField:    codeUnitRankField,
+	}
+	leftRank, rightRank := codeUnitRankOther, codeUnitRankOther
+	if value, ok := rank[left.Kind]; ok {
+		leftRank = value
+	}
+	if value, ok := rank[right.Kind]; ok {
+		rightRank = value
+	}
+	return leftRank < rightRank
+}
+
+func requestedRegionKinds(rules []config.Rule) map[parsing.CodeKind]parsing.CodeKind {
+	requested := make(map[parsing.CodeKind]parsing.CodeKind)
 	for _, rule := range rules {
 		for _, kind := range rule.Kinds {
-			switch parsing.CodeKind(kind) {
-			case parsing.CodeKindComment:
-				requested["comment"] = parsing.CodeKindComment
-			case parsing.CodeKindField:
-				requested["field"] = parsing.CodeKindField
-			case parsing.CodeKindStatement:
-				requested["statement"] = parsing.CodeKindStatement
+			parsed, ok := parsing.ParseCodeKind(kind.String())
+			if !ok {
+				continue
+			}
+			switch parsed {
+			case parsing.CodeKindComment, parsing.CodeKindField, parsing.CodeKindStatement:
+				requested[parsed] = parsed
 			}
 		}
 	}
@@ -348,7 +428,7 @@ func regionCodeUnit(
 ) parsing.CodeUnit {
 	return parsing.CodeUnit{
 		Kind:         kind,
-		Name:         parent.Name + ":" + region.Kind,
+		Name:         parent.Name + ":" + string(region.Kind),
 		Language:     parent.Language,
 		Path:         parent.Path,
 		Source:       region.Source,
@@ -364,21 +444,6 @@ func regionCodeUnit(
 	}
 }
 
-func codeKindRank(kind parsing.CodeKind) int {
-	switch kind {
-	case parsing.CodeKindType:
-		return 0
-	case parsing.CodeKindFunction:
-		return 1
-	case parsing.CodeKindComment:
-		return 2
-	case parsing.CodeKindField:
-		return 3
-	default:
-		return 4
-	}
-}
-
 func collectOutcomes(
 	report *Report,
 	outcomes []evaluationOutcome,
@@ -391,38 +456,17 @@ func collectOutcomes(
 	return pending
 }
 
-func appendFindings(report *Report, pending []pendingFinding) {
-	for _, item := range pending {
-		report.Findings = append(report.Findings, item.finding)
-	}
-}
-
 func appliesToKind(rule config.Rule, kind parsing.CodeKind) bool {
 	if len(rule.Kinds) == 0 {
 		return kind == parsing.CodeKindFunction || kind == parsing.CodeKindType
 	}
 	for _, allowed := range rule.Kinds {
-		if allowed == string(kind) {
+		parsed, ok := parsing.ParseCodeKind(allowed.String())
+		if ok && parsed == kind {
 			return true
 		}
 	}
 	return false
-}
-
-func evaluateJobs(
-	ctx context.Context,
-	evaluator evaluation.Evaluator,
-	jobs []evaluationJob,
-	concurrency int,
-) ([]evaluationOutcome, error) {
-	return runJobs(
-		ctx,
-		jobs,
-		concurrency,
-		func(ctx context.Context, job evaluationJob) (evaluationOutcome, error) {
-			return evaluateJob(ctx, evaluator, job)
-		},
-	)
 }
 
 func runJobs[Job any, Outcome any](
@@ -441,32 +485,36 @@ func runJobs[Job any, Outcome any](
 	jobContext, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	indices := queuedIndices(len(jobs))
-	outcomes := make([]Outcome, len(jobs))
-	firstError := runWorkers(jobContext, cancel, jobs, outcomes, indices, concurrency, evaluate)
+	scheduled := make([]scheduledWork[Job, Outcome], len(jobs))
+	indices := make(chan int, len(jobs))
+	for index, job := range jobs {
+		scheduled[index].job = job
+		indices <- index
+	}
+	close(indices)
+	firstError := runWorkers(jobContext, cancel, scheduled, indices, concurrency, evaluate)
 	if firstError != nil {
 		return nil, firstError
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	outcomes := make([]Outcome, len(scheduled))
+	for index, item := range scheduled {
+		outcomes[index] = item.outcome
+	}
 	return outcomes, nil
 }
 
-func queuedIndices(count int) <-chan int {
-	indices := make(chan int, count)
-	for index := range count {
-		indices <- index
-	}
-	close(indices)
-	return indices
+type scheduledWork[Job any, Outcome any] struct {
+	job     Job
+	outcome Outcome
 }
 
 func runWorkers[Job any, Outcome any](
 	ctx context.Context,
 	cancel context.CancelFunc,
-	jobs []Job,
-	outcomes []Outcome,
+	scheduled []scheduledWork[Job, Outcome],
 	indices <-chan int,
 	concurrency int,
 	evaluate func(context.Context, Job) (Outcome, error),
@@ -483,7 +531,7 @@ func runWorkers[Job any, Outcome any](
 				if ctx.Err() != nil {
 					return
 				}
-				outcome, err := evaluate(ctx, jobs[index])
+				outcome, err := evaluate(ctx, scheduled[index].job)
 				if err != nil {
 					errorOnce.Do(func() {
 						firstError = err
@@ -491,7 +539,7 @@ func runWorkers[Job any, Outcome any](
 					})
 					return
 				}
-				outcomes[index] = outcome
+				scheduled[index].outcome = outcome
 			}
 		}()
 	}
@@ -551,7 +599,7 @@ func evaluateJob(
 				Severity:    rule.Severity,
 				Status:      result.Status,
 				Path:        job.unit.Path,
-				Language:    job.unit.Language,
+				Language:    job.unit.Language.String(),
 				Kind:        job.unit.Kind,
 				Name:        job.unit.Name,
 				StartLine:   job.unit.StartLine,
@@ -573,8 +621,8 @@ func directUnitLocations(unit parsing.CodeUnit) []Location {
 		return nil
 	}
 	return []Location{{
-		Category:    string(unit.Kind),
-		Kind:        unit.RegionKind,
+		Category:    unit.Kind.String(),
+		Kind:        string(unit.RegionKind),
 		Source:      unit.Source,
 		StartLine:   unit.StartLine,
 		EndLine:     unit.EndLine,
@@ -601,7 +649,12 @@ func localizeFindings(
 	if err != nil {
 		return 0, err
 	}
-	applyLocalizationOutcomes(findings, outcomes)
+	for _, outcome := range outcomes {
+		if outcome.location != nil {
+			item := &findings[outcome.findingIndex]
+			item.finding.Locations = append(item.finding.Locations, *outcome.location)
+		}
+	}
 	return len(jobs), nil
 }
 
@@ -623,18 +676,6 @@ func localizationJobs(findings []pendingFinding) []localizationJob {
 	return jobs
 }
 
-func applyLocalizationOutcomes(
-	findings []pendingFinding,
-	outcomes []localizationOutcome,
-) {
-	for _, outcome := range outcomes {
-		if outcome.location != nil {
-			item := &findings[outcome.findingIndex]
-			item.finding.Locations = append(item.finding.Locations, *outcome.location)
-		}
-	}
-}
-
 func evaluateLocalizationJob(
 	ctx context.Context,
 	evaluator evaluation.Evaluator,
@@ -642,7 +683,7 @@ func evaluateLocalizationJob(
 ) (localizationOutcome, error) {
 	candidate := parsing.CodeUnit{
 		Kind:         parsing.CodeKindRegion,
-		Name:         job.parent.Name + ":" + job.region.Kind,
+		Name:         job.parent.Name + ":" + string(job.region.Kind),
 		Language:     job.parent.Language,
 		Path:         job.parent.Path,
 		Source:       job.region.Source,
@@ -690,8 +731,8 @@ func evaluateLocalizationJob(
 	outcome := localizationOutcome{findingIndex: job.findingIndex}
 	if result.Status == evaluation.StatusFail {
 		outcome.location = &Location{
-			Category:    job.region.Category,
-			Kind:        job.region.Kind,
+			Category:    job.region.Category.String(),
+			Kind:        string(job.region.Kind),
 			Source:      job.region.Source,
 			StartLine:   job.region.StartLine,
 			EndLine:     job.region.EndLine,
@@ -702,12 +743,13 @@ func evaluateLocalizationJob(
 	return outcome, nil
 }
 
-func localizesTo(rule config.Rule, category string) bool {
+func localizesTo(rule config.Rule, category parsing.CodeKind) bool {
 	if rule.Localize == nil {
 		return true
 	}
 	for _, allowed := range rule.Localize {
-		if allowed == category {
+		parsed, ok := parsing.ParseCodeKind(allowed.String())
+		if ok && parsed == category {
 			return true
 		}
 	}
@@ -750,10 +792,18 @@ func discoverRequestedPath(
 		return fmt.Errorf("inspect %q: %w", requestedPath, err)
 	}
 	if !info.IsDir() {
-		addSupportedFile(path, extractor, seen)
+		if extractor.Supports(path) {
+			seen[path] = struct{}{}
+		}
 		return nil
 	}
-	if err := walkSupportedFiles(path, extractor, seen); err != nil {
+	if err := filepath.WalkDir(path, func(
+		candidate string,
+		entry fs.DirEntry,
+		walkErr error,
+	) error {
+		return collectWalkEntry(path, candidate, entry, walkErr, extractor, seen)
+	}); err != nil {
 		return fmt.Errorf("walk %q: %w", requestedPath, err)
 	}
 	return nil
@@ -764,20 +814,6 @@ func resolveRequestedPath(root string, requestedPath string) string {
 		return filepath.Clean(requestedPath)
 	}
 	return filepath.Clean(filepath.Join(root, requestedPath))
-}
-
-func walkSupportedFiles(
-	root string,
-	extractor *parsing.Extractor,
-	seen map[string]struct{},
-) error {
-	return filepath.WalkDir(root, func(
-		candidate string,
-		entry fs.DirEntry,
-		walkErr error,
-	) error {
-		return collectWalkEntry(root, candidate, entry, walkErr, extractor, seen)
-	})
 }
 
 func collectWalkEntry(
@@ -792,25 +828,17 @@ func collectWalkEntry(
 		return walkErr
 	}
 	if entry.IsDir() {
-		if candidate != root && ignoredDirectory(entry.Name()) {
-			return filepath.SkipDir
+		if candidate != root {
+			if _, ignored := ignoredDirectoryNames[entry.Name()]; ignored {
+				return filepath.SkipDir
+			}
 		}
 		return nil
 	}
-	if entry.Type().IsRegular() {
-		addSupportedFile(candidate, extractor, seen)
+	if entry.Type().IsRegular() && extractor.Supports(candidate) {
+		seen[candidate] = struct{}{}
 	}
 	return nil
-}
-
-func addSupportedFile(
-	path string,
-	extractor *parsing.Extractor,
-	seen map[string]struct{},
-) {
-	if extractor.Supports(path) {
-		seen[path] = struct{}{}
-	}
 }
 
 func sortedDiscoveredFiles(seen map[string]struct{}) []string {
@@ -822,11 +850,14 @@ func sortedDiscoveredFiles(seen map[string]struct{}) []string {
 	return files
 }
 
-func ignoredDirectory(name string) bool {
-	switch name {
-	case ".git", ".hg", ".svn", ".venv", "node_modules", "vendor", "dist", "build":
-		return true
-	default:
-		return false
-	}
+var ignoredDirectoryNames = map[string]struct{}{
+	".git":         {},
+	".hg":          {},
+	".svn":         {},
+	".venv":        {},
+	"node_modules": {},
+	"vendor":       {},
+	"dist":         {},
+	"build":        {},
 }
+
