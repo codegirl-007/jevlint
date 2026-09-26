@@ -160,7 +160,7 @@ func TestCheckBatchesRulesPerFunctionAndRetainsSnippet(t *testing.T) {
 	report, err := (Runner{
 		Extractor: testGoExtractor(t),
 		Evaluator: evaluator,
-	}).Check(context.Background(), cfg, Options{Root: root, Concurrency: 1})
+	}).Evaluate(context.Background(), cfg, Options{Root: root, Concurrency: 1})
 	if err != nil {
 		t.Fatalf("Check() error = %v", err)
 	}
@@ -228,7 +228,7 @@ func TestCheckEvaluatesFunctionsConcurrently(t *testing.T) {
 		report, err := (Runner{
 			Extractor: testGoExtractor(t),
 			Evaluator: evaluator,
-		}).Check(context.Background(), cfg, Options{
+		}).Evaluate(context.Background(), cfg, Options{
 			Root:        root,
 			Concurrency: 2,
 		})
@@ -268,11 +268,11 @@ func TestCheckReportsCacheStatsForCurrentRun(t *testing.T) {
 	report, err := (Runner{
 		Extractor: testGoExtractor(t),
 		Evaluator: evaluator,
-	}).Check(context.Background(), config.Config{Rules: []config.Rule{{
+	}).Evaluate(context.Background(), config.Config{Rules: []config.Rule{{
 		ID:          "rule",
 		Description: "A rule.",
 		Severity:    config.SeverityInfo,
-		Kinds:       []string{"function"},
+		Kinds:       []config.TargetKind{config.TargetKindFunction},
 	}}}, Options{Root: root, Concurrency: 1})
 	if err != nil {
 		t.Fatalf("Check() error = %v", err)
@@ -305,26 +305,26 @@ func TestCheckEvaluatesRequestedRegionsDirectly(t *testing.T) {
 			ID:          "comments",
 			Description: "Comments are useful.",
 			Severity:    config.SeverityWarning,
-			Kinds:       []string{"comment"},
+			Kinds:       []config.TargetKind{config.TargetKindComment},
 		},
 		{
 			ID:          "fields",
 			Description: "Fields are clear.",
 			Severity:    config.SeverityWarning,
-			Kinds:       []string{"field"},
+			Kinds:       []config.TargetKind{config.TargetKindField},
 		},
 		{
 			ID:          "statements",
 			Description: "Statements are clear.",
 			Severity:    config.SeverityWarning,
-			Kinds:       []string{"statement"},
+			Kinds:       []config.TargetKind{config.TargetKindStatement},
 		},
 	}}
 	evaluator := &failingRecordingEvaluator{}
 	report, err := (Runner{
 		Extractor: testGoExtractor(t),
 		Evaluator: evaluator,
-	}).Check(context.Background(), cfg, Options{Root: root, Concurrency: 1})
+	}).Evaluate(context.Background(), cfg, Options{Root: root, Concurrency: 1})
 	if err != nil {
 		t.Fatalf("Check() error = %v", err)
 	}
@@ -361,7 +361,7 @@ func TestCheckEvaluatesRequestedRegionsDirectly(t *testing.T) {
 	}
 	for _, finding := range report.Findings {
 		if len(finding.Locations) != 1 ||
-			finding.Locations[0].Category != string(finding.Kind) ||
+			finding.Locations[0].Category != finding.Kind.String() ||
 			finding.Locations[0].Kind == "" {
 			t.Fatalf("direct finding location = %#v", finding)
 		}
@@ -370,7 +370,7 @@ func TestCheckEvaluatesRequestedRegionsDirectly(t *testing.T) {
 
 func TestUnitsForRulesDeduplicatesRegionsUsingClosestParent(t *testing.T) {
 	region := parsing.Region{
-		Category:  "comment",
+		Category:  parsing.CodeKindComment,
 		Kind:      "comment",
 		Source:    "// Helpful.",
 		StartByte: 25,
@@ -394,9 +394,9 @@ func TestUnitsForRulesDeduplicatesRegionsUsingClosestParent(t *testing.T) {
 			Regions:   []parsing.Region{region},
 		},
 	}
-	rules := []config.Rule{{Kinds: []string{"comment"}}}
+	rules := []config.Rule{{Kinds: []config.TargetKind{config.TargetKindComment}}}
 
-	expanded := unitsForRules(units, rules)
+	expanded := expandUnitsForRules(units, rules)
 	if len(expanded) != 3 {
 		t.Fatalf("unitsForRules() = %#v, want one deduplicated region", expanded)
 	}
@@ -410,9 +410,20 @@ func TestUnitsForRulesDeduplicatesRegionsUsingClosestParent(t *testing.T) {
 		t.Fatalf("comment unit = %#v, want closest function parent", comment)
 	}
 
-	if got := unitsForRules(units, []config.Rule{{}}); len(got) != len(units) {
+	if got := expandUnitsForRules(units, []config.Rule{{}}); len(got) != len(units) {
 		t.Fatalf("omitted kinds expanded %d units, want %d", len(got), len(units))
 	}
+}
+
+func expandUnitsForRules(
+	units []parsing.CodeUnit,
+	rules []config.Rule,
+) []parsing.CodeUnit {
+	requested := requestedRegionKinds(rules)
+	if len(requested) == 0 {
+		return units
+	}
+	return expandUnitsWithRegions(units, selectClosestRegions(units, requested))
 }
 
 func TestRunJobsPreservesInputOrder(t *testing.T) {
@@ -498,13 +509,13 @@ func TestCheckLocalizesFailedRuleToTreeSitterRegion(t *testing.T) {
 		ID:          "boolean-property-naming",
 		Description: "Boolean fields clearly describe the true state.",
 		Severity:    config.SeverityWarning,
-		Kinds:       []string{"type"},
-		Localize:    []string{"field"},
+		Kinds:       []config.TargetKind{config.TargetKindType},
+		Localize:    []config.TargetKind{config.TargetKindField},
 	}}}
 	report, err := (Runner{
 		Extractor: testGoExtractor(t),
 		Evaluator: booleanFieldEvaluator{},
-	}).Check(context.Background(), cfg, Options{Root: root, Concurrency: 2})
+	}).Evaluate(context.Background(), cfg, Options{Root: root, Concurrency: 2})
 	if err != nil {
 		t.Fatalf("Check() error = %v", err)
 	}
@@ -529,10 +540,10 @@ func TestCheckLocalizesFailedRuleToTreeSitterRegion(t *testing.T) {
 func TestLocalizesToDistinguishesOmittedAndExplicitEmpty(t *testing.T) {
 	t.Parallel()
 
-	if !localizesTo(config.Rule{}, "statement") {
+	if !localizesTo(config.Rule{}, parsing.CodeKindStatement) {
 		t.Fatal("omitted localization should allow every category")
 	}
-	if localizesTo(config.Rule{Localize: []string{}}, "statement") {
+	if localizesTo(config.Rule{Localize: []config.TargetKind{}}, parsing.CodeKindStatement) {
 		t.Fatal("explicit empty localization should disable the second pass")
 	}
 }
@@ -553,11 +564,11 @@ func TestCheckUsesSourceOverlayAndReportsScannedPaths(t *testing.T) {
 	report, err := (Runner{
 		Extractor: testGoExtractor(t),
 		Evaluator: evaluator,
-	}).Check(context.Background(), config.Config{Rules: []config.Rule{{
+	}).Evaluate(context.Background(), config.Config{Rules: []config.Rule{{
 		ID:          "names",
 		Description: "Use an overlay name.",
 		Severity:    config.SeverityError,
-		Localize:    []string{},
+		Localize:    []config.TargetKind{},
 	}}}, Options{
 		Root: root,
 		SourceOverlay: map[string][]byte{

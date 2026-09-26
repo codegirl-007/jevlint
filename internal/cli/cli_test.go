@@ -5,9 +5,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -17,6 +19,15 @@ import (
 	"jevlint/internal/parsing"
 	"jevlint/internal/runner"
 )
+
+func runCLI(
+	ctx context.Context,
+	args []string,
+	stdout io.Writer,
+	stderr io.Writer,
+) int {
+	return Run(ctx, args, stdout, stderr, os.Getenv)
+}
 
 func TestRunReportsJevFailureAsJSON(t *testing.T) {
 	root := writeProject(t, `
@@ -45,7 +56,7 @@ func JoinInCode() {
 	t.Setenv("TYPESAFE_DEFAULT_MODEL", "jev-test")
 
 	var stdout, stderr bytes.Buffer
-	exitCode := Run(
+	exitCode := runCLI(
 		context.Background(),
 		[]string{"check", "--config", filepath.Join(root, "jevlint.json"), "--format", "json", "."},
 		&stdout,
@@ -105,7 +116,7 @@ func TestRunFixRequiresConfiguredACPCommand(t *testing.T) {
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 
 	var stdout, stderr bytes.Buffer
-	exitCode := Run(
+	exitCode := runCLI(
 		context.Background(),
 		[]string{"fix", "--config", filepath.Join(root, "jevlint.json"), "."},
 		&stdout,
@@ -156,7 +167,7 @@ func JoinInCode() {
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 
 	var stdout, stderr bytes.Buffer
-	exitCode := Run(
+	exitCode := runCLI(
 		context.Background(),
 		[]string{"check", "--clear-cache", "--fix", "--config", filepath.Join(root, "jevlint.json"), "."},
 		&stdout,
@@ -193,7 +204,7 @@ func TestWriteFixOutputIncludesRejectedProposal(t *testing.T) {
 	}
 
 	var text bytes.Buffer
-	if err := writeFixOutput(&text, output, "text", "never"); err != nil {
+	if err := writeFixOutput(&text, output, outputContext{format: formatText, color: colorNever}); err != nil {
 		t.Fatalf("write text fix output: %v", err)
 	}
 	for _, expected := range []string{
@@ -219,7 +230,7 @@ func TestWriteFixOutputIncludesRejectedProposal(t *testing.T) {
 	validated.Validated = true
 	validated.Findings = nil
 	var accepted bytes.Buffer
-	if err := writeFixOutput(&accepted, validated, "text", "never"); err != nil {
+	if err := writeFixOutput(&accepted, validated, outputContext{format: formatText, color: colorNever}); err != nil {
 		t.Fatalf("write accepted text fix output: %v", err)
 	}
 	for _, expected := range []string{
@@ -233,7 +244,7 @@ func TestWriteFixOutputIncludesRejectedProposal(t *testing.T) {
 	}
 
 	var encoded bytes.Buffer
-	if err := writeFixOutput(&encoded, output, "json", "never"); err != nil {
+	if err := writeFixOutput(&encoded, output, outputContext{format: formatJSON, color: colorNever}); err != nil {
 		t.Fatalf("write JSON fix output: %v", err)
 	}
 	var decoded fixOutput
@@ -277,7 +288,12 @@ func TestWriteTextHighlightsRuleAndSnippet(t *testing.T) {
 		}},
 	}
 	var output bytes.Buffer
-	writeText(&output, report)
+	if err := writeReport(&output, report, outputContext{
+		format: formatText,
+		color:  colorNever,
+	}); err != nil {
+		t.Fatalf("writeReport() error = %v", err)
+	}
 
 	for _, expected := range []string{
 		"✗ ERROR  database-joins",
@@ -299,7 +315,12 @@ func TestWriteTextHighlightsRuleAndSnippet(t *testing.T) {
 	}
 
 	var colored bytes.Buffer
-	writeTextStyled(&colored, report, true)
+	if err := writeReport(&colored, report, outputContext{
+		format: formatText,
+		color:  colorAlways,
+	}); err != nil {
+		t.Fatalf("writeReport() error = %v", err)
+	}
 	if !strings.Contains(colored.String(), "\x1b[1;31m") {
 		t.Fatalf("colored output lacks error color: %q", colored.String())
 	}
@@ -316,11 +337,11 @@ func TestFixProgressStreamsAgentMessageChunks(t *testing.T) {
 
 	var output bytes.Buffer
 	progress := newFixProgress(&output, false)
-	progress.status("starting ACP agent")
+	progress.writeProgress("starting ACP agent")
 	progress.toolActivity("Reading internal/cli/cli.go")
 	progress.agentMessage("Changing ")
 	progress.agentMessage("the function.")
-	progress.status("validating proposed changes with Jev")
+	progress.writeProgress("validating proposed changes with Jev")
 
 	want := "  ◆ Starting ACP agent\n" +
 		"  ↳ Reading internal/cli/cli.go\n" +
@@ -486,7 +507,7 @@ func TestRunRequiresAPIKey(t *testing.T) {
 	t.Setenv("TYPESAFE_API_KEY", "")
 
 	var stdout, stderr bytes.Buffer
-	exitCode := Run(
+	exitCode := runCLI(
 		context.Background(),
 		[]string{"check", "--config", filepath.Join(root, "jevlint.json"), "."},
 		&stdout,
@@ -546,7 +567,7 @@ func TestRunRejectsInvalidLanguageConfigurationBeforeAPIKey(t *testing.T) {
 			t.Setenv("TYPESAFE_API_KEY", "")
 
 			var stdout, stderr bytes.Buffer
-			exitCode := Run(
+			exitCode := runCLI(
 				context.Background(),
 				[]string{"check", "--config", configPath, "."},
 				&stdout,
@@ -569,7 +590,7 @@ func TestRunRejectsInvalidConcurrency(t *testing.T) {
 	t.Parallel()
 
 	var stdout, stderr bytes.Buffer
-	exitCode := Run(
+	exitCode := runCLI(
 		context.Background(),
 		[]string{"check", "--concurrency", "0"},
 		&stdout,
@@ -587,7 +608,7 @@ func TestRunRejectsConflictingCacheFlags(t *testing.T) {
 	t.Parallel()
 
 	var stdout, stderr bytes.Buffer
-	exitCode := Run(
+	exitCode := runCLI(
 		context.Background(),
 		[]string{"check", "--no-cache", "--refresh-cache"},
 		&stdout,
@@ -609,7 +630,7 @@ func TestRunClearsProjectCacheBeforeAPIValidation(t *testing.T) {
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 	t.Setenv("TYPESAFE_API_KEY", "")
 
-	cache, err := evaluation.NewFileCache(root)
+	cache, err := evaluation.NewFileCache(root, os.UserCacheDir)
 	if err != nil {
 		t.Fatalf("NewFileCache() error = %v", err)
 	}
@@ -620,7 +641,7 @@ func TestRunClearsProjectCacheBeforeAPIValidation(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	exitCode := Run(
+	exitCode := runCLI(
 		context.Background(),
 		[]string{
 			"check",
@@ -647,7 +668,7 @@ func TestRunRejectsInvalidColorMode(t *testing.T) {
 	t.Parallel()
 
 	var stdout, stderr bytes.Buffer
-	exitCode := Run(
+	exitCode := runCLI(
 		context.Background(),
 		[]string{"check", "--color", "sparkles"},
 		&stdout,
@@ -657,6 +678,129 @@ func TestRunRejectsInvalidColorMode(t *testing.T) {
 		t.Fatalf("Run() exit code = %d, want 2", exitCode)
 	}
 	if !strings.Contains(stderr.String(), "--color must be auto, always, or never") {
+		t.Fatalf("stderr = %q", stderr.String())
+	}
+}
+
+func TestRunChangedChecksOnlyDirtyFiles(t *testing.T) {
+	root := writeGitProject(t, map[string]string{
+		"clean.go": "package sample\n\nfunc Clean() {}\n",
+		"dirty.go": "package sample\n\nfunc Dirty() {}\n",
+	})
+	writeProjectFile(t, root, "dirty.go", "package sample\n\nfunc Dirty() {\n\tprintln(\"join\")\n}\n")
+	server := passingJevServer(t)
+	t.Setenv("TYPESAFE_API_KEY", "sk-test")
+	t.Setenv("TYPESAFE_BASE_URL", server.URL)
+	t.Setenv("TYPESAFE_DEFAULT_MODEL", "jev-test")
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+
+	var stdout, stderr bytes.Buffer
+	exitCode := runCLI(
+		context.Background(),
+		[]string{
+			"check",
+			"--changed",
+			"--config", filepath.Join(root, "jevlint.json"),
+			"--format", "json",
+		},
+		&stdout,
+		&stderr,
+	)
+	if exitCode != 0 {
+		t.Fatalf("Run() exit code = %d, stderr = %q", exitCode, stderr.String())
+	}
+	report := decodeReport(t, stdout.Bytes())
+	if report.ScannedFiles != 1 {
+		t.Fatalf("scannedFiles = %d, want 1; stdout = %s", report.ScannedFiles, stdout.String())
+	}
+}
+
+func TestRunChangedIntersectsExplicitPaths(t *testing.T) {
+	root := writeGitProject(t, map[string]string{
+		"other.go":    "package sample\n\nfunc Other() {}\n",
+		"src/keep.go": "package sample\n\nfunc Keep() {}\n",
+	})
+	writeProjectFile(t, root, "other.go", "package sample\n\nfunc Other() {\n\tprintln(\"join\")\n}\n")
+	writeProjectFile(t, root, "src/keep.go", "package sample\n\nfunc Keep() {\n\tprintln(\"join\")\n}\n")
+	server := passingJevServer(t)
+	t.Setenv("TYPESAFE_API_KEY", "sk-test")
+	t.Setenv("TYPESAFE_BASE_URL", server.URL)
+	t.Setenv("TYPESAFE_DEFAULT_MODEL", "jev-test")
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+
+	var stdout, stderr bytes.Buffer
+	exitCode := runCLI(
+		context.Background(),
+		[]string{
+			"check",
+			"--changed",
+			"--config", filepath.Join(root, "jevlint.json"),
+			"--format", "json",
+			"src",
+		},
+		&stdout,
+		&stderr,
+	)
+	if exitCode != 0 {
+		t.Fatalf("Run() exit code = %d, stderr = %q", exitCode, stderr.String())
+	}
+	report := decodeReport(t, stdout.Bytes())
+	if report.ScannedFiles != 1 {
+		t.Fatalf("scannedFiles = %d, want 1; stdout = %s", report.ScannedFiles, stdout.String())
+	}
+}
+
+func TestRunChangedEmptyDirtySetDoesNotScanProject(t *testing.T) {
+	root := writeGitProject(t, map[string]string{
+		"sample.go": "package sample\n\nfunc JoinInCode() {}\n",
+	})
+	t.Setenv("TYPESAFE_API_KEY", "")
+
+	var stdout, stderr bytes.Buffer
+	exitCode := runCLI(
+		context.Background(),
+		[]string{
+			"check",
+			"--changed",
+			"--config", filepath.Join(root, "jevlint.json"),
+			"--format", "json",
+		},
+		&stdout,
+		&stderr,
+	)
+	if exitCode != 0 {
+		t.Fatalf("Run() exit code = %d, want 0; stderr = %q", exitCode, stderr.String())
+	}
+	if strings.Contains(stderr.String(), "TYPESAFE_API_KEY") {
+		t.Fatalf("empty --changed reached API validation: %q", stderr.String())
+	}
+	report := decodeReport(t, stdout.Bytes())
+	if report.ScannedFiles != 0 || report.CodeUnits != 0 || report.Evaluations != 0 {
+		t.Fatalf("empty --changed scanned the project: %#v", report)
+	}
+}
+
+func TestRunChangedRequiresGitRepository(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git is required for --changed tests")
+	}
+	root := writeProject(t, "package sample\n")
+
+	var stdout, stderr bytes.Buffer
+	exitCode := runCLI(
+		context.Background(),
+		[]string{
+			"check",
+			"--changed",
+			"--config", filepath.Join(root, "jevlint.json"),
+		},
+		&stdout,
+		&stderr,
+	)
+	if exitCode != 2 {
+		t.Fatalf("Run() exit code = %d, want 2; stderr = %q", exitCode, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "--changed requires a git repository") {
 		t.Fatalf("stderr = %q", stderr.String())
 	}
 }
@@ -681,4 +825,97 @@ func writeProject(t *testing.T, source string) string {
 		t.Fatalf("write source: %v", err)
 	}
 	return root
+}
+
+func writeGitProject(t *testing.T, sources map[string]string) string {
+	t.Helper()
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git is required for --changed tests")
+	}
+
+	root := t.TempDir()
+	writeProjectConfig(t, root)
+	for relative, source := range sources {
+		writeProjectFile(t, root, relative, source)
+	}
+	runGit(t, root, "init", "--initial-branch=main")
+	runGit(t, root, "config", "user.email", "jevlint@example.com")
+	runGit(t, root, "config", "user.name", "jevlint")
+	runGit(t, root, "config", "commit.gpgsign", "false")
+	runGit(t, root, "add", ".")
+	runGit(t, root, "commit", "-m", "initial")
+	return root
+}
+
+func writeProjectConfig(t *testing.T, root string) {
+	t.Helper()
+	config := `{
+		"languages": {"go": {}},
+		"rules": [{
+			"id": "database-joins",
+			"description": "Join related records in the database.",
+			"severity": "error",
+			"include": ["**/*.go"]
+		}]
+	}`
+	if err := os.WriteFile(filepath.Join(root, "jevlint.json"), []byte(config), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+}
+
+func writeProjectFile(t *testing.T, root string, relative string, source string) {
+	t.Helper()
+	path := filepath.Join(root, relative)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatalf("mkdir %s: %v", relative, err)
+	}
+	if err := os.WriteFile(path, []byte(source), 0o600); err != nil {
+		t.Fatalf("write %s: %v", relative, err)
+	}
+}
+
+func runGit(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	command := exec.Command("git", args...)
+	command.Dir = dir
+	command.Env = append(os.Environ(),
+		"GIT_AUTHOR_NAME=jevlint",
+		"GIT_AUTHOR_EMAIL=jevlint@example.com",
+		"GIT_COMMITTER_NAME=jevlint",
+		"GIT_COMMITTER_EMAIL=jevlint@example.com",
+	)
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, output)
+	}
+}
+
+func passingJevServer(t *testing.T) *httptest.Server {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(
+		func(writer http.ResponseWriter, _ *http.Request) {
+			writer.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(writer, `{
+				"model": "jev-test",
+				"answers": {
+					"database-joins": {
+						"type": "choice",
+						"choice": "pass",
+						"confidence": 1
+					}
+				}
+			}`)
+		},
+	))
+	t.Cleanup(server.Close)
+	return server
+}
+
+func decodeReport(t *testing.T, payload []byte) runner.Report {
+	t.Helper()
+	var report runner.Report
+	if err := json.Unmarshal(payload, &report); err != nil {
+		t.Fatalf("decode output: %v\noutput: %s", err, payload)
+	}
+	return report
 }

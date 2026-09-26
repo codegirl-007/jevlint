@@ -25,20 +25,26 @@ func TestGenerateEditsProjectFiles(t *testing.T) {
 	var agentText strings.Builder
 
 	proposal, err := Generate(context.Background(), Options{
-		Root:       root,
-		ConfigPath: filepath.Join(root, "jevlint.json"),
-		Command:    []string{os.Args[0], "-test.run=TestACPHelperProcess"},
-		Findings:   []runner.Finding{testFinding()},
-		Progress: func(message string) {
-			progressMu.Lock()
-			progress = append(progress, message)
-			progressMu.Unlock()
+		Workspace: Workspace{
+			Root:       root,
+			ConfigPath: filepath.Join(root, "jevlint.json"),
 		},
-		AgentMessage: func(message string) {
-			progressMu.Lock()
-			agentText.WriteString(message)
-			progressMu.Unlock()
+		Agent: AgentSession{
+			Command: []string{os.Args[0], "-test.run=TestACPHelperProcess"},
+			Feedback: AgentFeedback{
+				Progress: func(message string) {
+					progressMu.Lock()
+					progress = append(progress, message)
+					progressMu.Unlock()
+				},
+				Message: func(message string) {
+					progressMu.Lock()
+					agentText.WriteString(message)
+					progressMu.Unlock()
+				},
+			},
 		},
+		Findings: []runner.Finding{testFinding()},
 	})
 	if err != nil {
 		t.Fatalf("Generate() error = %v", err)
@@ -78,12 +84,7 @@ func TestGenerateRejectsUnexpectedFiles(t *testing.T) {
 	root := writeFixProject(t)
 	t.Setenv("JEVLINT_ACP_HELPER", "unexpected")
 
-	_, err := Generate(context.Background(), Options{
-		Root:       root,
-		ConfigPath: filepath.Join(root, "jevlint.json"),
-		Command:    []string{os.Args[0], "-test.run=TestACPHelperProcess"},
-		Findings:   []runner.Finding{testFinding()},
-	})
+	_, err := Generate(context.Background(), testGenerateOptions(root))
 	if err == nil || !strings.Contains(err.Error(), "created unexpected file") {
 		t.Fatalf("Generate() error = %v", err)
 	}
@@ -96,12 +97,7 @@ func TestGenerateAcceptsEditsToExistingProjectFiles(t *testing.T) {
 	root := writeFixProject(t)
 	t.Setenv("JEVLINT_ACP_HELPER", "modify-context")
 
-	proposal, err := Generate(context.Background(), Options{
-		Root:       root,
-		ConfigPath: filepath.Join(root, "jevlint.json"),
-		Command:    []string{os.Args[0], "-test.run=TestACPHelperProcess"},
-		Findings:   []runner.Finding{testFinding()},
-	})
+	proposal, err := Generate(context.Background(), testGenerateOptions(root))
 	if err != nil {
 		t.Fatalf("Generate() error = %v", err)
 	}
@@ -121,15 +117,7 @@ func TestGenerateRejectsUnsafeWorkspaceChanges(t *testing.T) {
 			t.Setenv("JEVLINT_ACP_HELPER", mode)
 			root := writeFixProject(t)
 
-			_, err := Generate(context.Background(), Options{
-				Root:       root,
-				ConfigPath: filepath.Join(root, "jevlint.json"),
-				Command: []string{
-					os.Args[0],
-					"-test.run=TestACPHelperProcess",
-				},
-				Findings: []runner.Finding{testFinding()},
-			})
+			_, err := Generate(context.Background(), testGenerateOptions(root))
 			if err == nil || !strings.Contains(err.Error(), expected) {
 				t.Fatalf("Generate() error = %v, want %q", err, expected)
 			}
@@ -150,12 +138,7 @@ func TestGenerateCancelsACPAgent(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
 
-	_, err := Generate(ctx, Options{
-		Root:       root,
-		ConfigPath: filepath.Join(root, "jevlint.json"),
-		Command:    []string{os.Args[0], "-test.run=TestACPHelperProcess"},
-		Findings:   []runner.Finding{testFinding()},
-	})
+	_, err := Generate(ctx, testGenerateOptions(root))
 	if err == nil {
 		t.Fatal("Generate() cancellation error = nil")
 	}
@@ -441,6 +424,19 @@ func (*fakeACPAgent) SetSessionMode(
 	acp.SetSessionModeRequest,
 ) (acp.SetSessionModeResponse, error) {
 	return acp.SetSessionModeResponse{}, nil
+}
+
+func testGenerateOptions(root string) Options {
+	return Options{
+		Workspace: Workspace{
+			Root:       root,
+			ConfigPath: filepath.Join(root, "jevlint.json"),
+		},
+		Agent: AgentSession{
+			Command: []string{os.Args[0], "-test.run=TestACPHelperProcess"},
+		},
+		Findings: []runner.Finding{testFinding()},
+	}
 }
 
 func writeFixProject(t *testing.T) string {

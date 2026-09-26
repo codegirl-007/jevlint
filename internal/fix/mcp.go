@@ -41,12 +41,17 @@ func checkMCPServer(workspace string, configPath string, cacheRoot string) (acp.
 			Name:    "jevlint",
 			Command: executable,
 			Args:    []string{"mcp-check"},
-			Env:     checkMCPEnv(workspace, configPath, cacheRoot),
+			Env:     checkMCPEnv(workspace, configPath, cacheRoot, os.Getenv),
 		},
 	}, nil
 }
 
-func checkMCPEnv(workspace string, configPath string, cacheRoot string) []acp.EnvVariable {
+func checkMCPEnv(
+	workspace string,
+	configPath string,
+	cacheRoot string,
+	getenv func(string) string,
+) []acp.EnvVariable {
 	env := []acp.EnvVariable{
 		{Name: "JEVLINT_MCP_ROOT", Value: workspace},
 		{Name: "JEVLINT_MCP_CONFIG", Value: configPath},
@@ -64,14 +69,19 @@ func checkMCPEnv(workspace string, configPath string, cacheRoot string) []acp.En
 		"HTTP_PROXY",
 		"NO_PROXY",
 	} {
-		if value := os.Getenv(name); value != "" {
+		if value := getenv(name); value != "" {
 			env = append(env, acp.EnvVariable{Name: name, Value: value})
 		}
 	}
 	return env
 }
 
-func ServeCheck(ctx context.Context, stdin io.Reader, stdout io.Writer) error {
+func ServeMCP(
+	ctx context.Context,
+	stdin io.Reader,
+	stdout io.Writer,
+	getenv func(string) string,
+) error {
 	reader := bufio.NewReader(stdin)
 	for {
 		if err := ctx.Err(); err != nil {
@@ -91,7 +101,7 @@ func ServeCheck(ctx context.Context, stdin io.Reader, stdout io.Writer) error {
 		if request.Method == "" || len(request.ID) == 0 {
 			continue
 		}
-		response, err := handleMCPRequest(ctx, request)
+		response, err := handleMCPRequest(ctx, request, getenv)
 		if err != nil {
 			return err
 		}
@@ -101,7 +111,11 @@ func ServeCheck(ctx context.Context, stdin io.Reader, stdout io.Writer) error {
 	}
 }
 
-func handleMCPRequest(ctx context.Context, request mcpRequest) ([]byte, error) {
+func handleMCPRequest(
+	ctx context.Context,
+	request mcpRequest,
+	getenv func(string) string,
+) ([]byte, error) {
 	switch request.Method {
 	case "initialize":
 		return mcpResult(request.ID, map[string]any{
@@ -137,7 +151,7 @@ func handleMCPRequest(ctx context.Context, request mcpRequest) ([]byte, error) {
 		if call.Name != checkToolName {
 			return mcpError(request.ID, "unknown tool "+call.Name)
 		}
-		text, err := runWorkspaceCheck(ctx)
+		text, err := runWorkspaceCheck(ctx, getenv)
 		if err != nil {
 			return mcpResult(request.ID, map[string]any{
 				"content": []map[string]any{{
@@ -158,9 +172,9 @@ func handleMCPRequest(ctx context.Context, request mcpRequest) ([]byte, error) {
 	}
 }
 
-func runWorkspaceCheck(ctx context.Context) (string, error) {
-	root := os.Getenv("JEVLINT_MCP_ROOT")
-	configPath := os.Getenv("JEVLINT_MCP_CONFIG")
+func runWorkspaceCheck(ctx context.Context, getenv func(string) string) (string, error) {
+	root := getenv("JEVLINT_MCP_ROOT")
+	configPath := getenv("JEVLINT_MCP_CONFIG")
 	if root == "" || configPath == "" {
 		return "", fmt.Errorf("JEVLINT_MCP_ROOT and JEVLINT_MCP_CONFIG are required")
 	}
@@ -172,16 +186,17 @@ func runWorkspaceCheck(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	cacheRoot := os.Getenv("JEVLINT_MCP_CACHE_ROOT")
+	cacheRoot := getenv("JEVLINT_MCP_CACHE_ROOT")
 	if cacheRoot == "" {
 		cacheRoot = root
 	}
-	resultCache, err := evaluation.NewFileCache(cacheRoot)
+	resultCache, err := evaluation.NewFileCache(cacheRoot, os.UserCacheDir)
 	if err != nil {
 		return "", fmt.Errorf("evaluation cache: %w", err)
 	}
 	evaluator, err := evaluation.NewTypeSafeFromEnvWithOptions(
 		evaluation.TypeSafeOptions{Cache: resultCache},
+		getenv,
 	)
 	if err != nil {
 		return "", err
@@ -189,10 +204,11 @@ func runWorkspaceCheck(ctx context.Context) (string, error) {
 	report, err := (runner.Runner{
 		Extractor: extractor,
 		Evaluator: evaluator,
-	}).Check(ctx, cfg, runner.Options{
-		Root:        root,
-		Paths:       []string{"."},
-		Concurrency: 4,
+	}).Evaluate(ctx, cfg, runner.Options{
+		Root: root,
+		// jevlint_check always scans the project. --changed only scopes
+		// the opening CLI check.
+		Paths: []string{"."},
 	})
 	if err != nil {
 		return "", err
@@ -211,48 +227,53 @@ func runWorkspaceCheck(ctx context.Context) (string, error) {
 }
 
 func mcpResult(id json.RawMessage, result any) ([]byte, error) {
-	return json.Marshal(map[string]any{
+	message := map[string]any{
 		"jsonrpc": "2.0",
-		"id":      jsonRaw(id),
 		"result":  result,
-	})
+	}
+	if len(id) > 0 {
+		copied := make(json.RawMessage, len(id))
+		copy(copied, id)
+		message["id"] = copied
+	}
+	return json.Marshal(message)
 }
 
 func mcpError(id json.RawMessage, message string) ([]byte, error) {
-	return json.Marshal(map[string]any{
+	payload := map[string]any{
 		"jsonrpc": "2.0",
-		"id":      jsonRaw(id),
 		"error": map[string]any{
-			"code":    -32601,
+			"code":    jsonRPCMethodNotFound,
 			"message": message,
 		},
-	})
+	}
+	if len(id) > 0 {
+		copied := make(json.RawMessage, len(id))
+		copy(copied, id)
+		payload["id"] = copied
+	}
+	return json.Marshal(payload)
 }
 
-func jsonRaw(id json.RawMessage) any {
-	if len(id) == 0 {
-		return nil
-	}
-	var value any
-	if err := json.Unmarshal(id, &value); err != nil {
-		return nil
-	}
-	return value
-}
+const (
+	jsonRPCMethodNotFound = -32601
+	mcpProtocol2024_11_05 = "2024-11-05"
+	mcpProtocol2025_03_26 = "2025-03-26"
+	mcpProtocol2025_06_18 = "2025-06-18"
+)
 
 func initializeProtocolVersion(params json.RawMessage) string {
-	const fallback = "2024-11-05"
 	var decoded struct {
 		ProtocolVersion string `json:"protocolVersion"`
 	}
 	if err := json.Unmarshal(params, &decoded); err != nil {
-		return fallback
+		return mcpProtocol2024_11_05
 	}
 	switch decoded.ProtocolVersion {
-	case "2024-11-05", "2025-03-26", "2025-06-18":
+	case mcpProtocol2024_11_05, mcpProtocol2025_03_26, mcpProtocol2025_06_18:
 		return decoded.ProtocolVersion
 	default:
-		return fallback
+		return mcpProtocol2024_11_05
 	}
 }
 

@@ -22,14 +22,22 @@ import (
 	"jevlint/internal/config"
 )
 
+type queryKind int
+
+const (
+	queryFunction queryKind = iota
+	queryType
+	queryTypeContext
+)
+
+type languageQueries map[queryKind][]string
+
 type languagePreset struct {
-	name               string
-	language           *tree_sitter.Language
-	extensions         []string
-	functionQueries    []string
-	typeQueries        []string
-	typeContextQueries []string
-	regions            map[string][]string
+	name       string
+	language   *tree_sitter.Language
+	extensions []string
+	queries    languageQueries
+	regions    map[CodeKind][]string
 }
 
 func NewExtractor(enabled map[string]config.Language) (*Extractor, error) {
@@ -69,22 +77,44 @@ func configuredLanguage(
 	preset languagePreset,
 	override config.Language,
 ) (languageSpec, []string, error) {
-	extensions := chooseStrings(preset.extensions, override.Extensions)
-	functionQueries := chooseStrings(preset.functionQueries, override.FunctionQueries)
-	typeQueries := chooseStrings(preset.typeQueries, override.TypeQueries)
-	typeContextQueries := chooseStrings(
-		preset.typeContextQueries,
-		override.TypeContextQueries,
-	)
-	regions := mergeRegions(preset.regions, override.Regions)
+	extensions := append([]string(nil), preset.extensions...)
+	if override.Extensions != nil {
+		extensions = append([]string(nil), override.Extensions...)
+	}
+	functionQueries := append([]string(nil), preset.queries[queryFunction]...)
+	if override.FunctionQueries != nil {
+		functionQueries = append([]string(nil), override.FunctionQueries...)
+	}
+	typeQueries := append([]string(nil), preset.queries[queryType]...)
+	if override.TypeQueries != nil {
+		typeQueries = append([]string(nil), override.TypeQueries...)
+	}
+	typeContextQueries := append([]string(nil), preset.queries[queryTypeContext]...)
+	if override.TypeContextQueries != nil {
+		typeContextQueries = append([]string(nil), override.TypeContextQueries...)
+	}
+	regions := mergeRegions(map[string][]string{
+		config.KindComment:   append([]string(nil), preset.regions[CodeKindComment]...),
+		config.KindField:     append([]string(nil), preset.regions[CodeKindField]...),
+		config.KindStatement: append([]string(nil), preset.regions[CodeKindStatement]...),
+	}, override.Regions)
+	languageID, ok := ParseSourceLanguage(preset.name)
+	if !ok {
+		return languageSpec{}, nil, fmt.Errorf("unknown language preset %q", preset.name)
+	}
+	regionKinds, err := categorizeRegions(regions)
+	if err != nil {
+		return languageSpec{}, nil, err
+	}
 
 	spec := languageSpec{
 		name:             preset.name,
+		id:               languageID,
 		language:         preset.language,
 		functionQuery:    strings.Join(functionQueries, "\n\n"),
 		typeQuery:        strings.Join(typeQueries, "\n\n"),
 		typeContextQuery: strings.Join(typeContextQueries, "\n\n"),
-		regionKinds:      categorizeRegions(regions),
+		regionKinds:      regionKinds,
 	}
 	if err := validateConfiguredQuery(
 		preset.name,
@@ -118,13 +148,6 @@ func configuredLanguage(
 	return spec, extensions, nil
 }
 
-func chooseStrings(defaults []string, override []string) []string {
-	if override != nil {
-		return append([]string(nil), override...)
-	}
-	return append([]string(nil), defaults...)
-}
-
 func mergeRegions(
 	defaults map[string][]string,
 	override map[string][]string,
@@ -139,14 +162,18 @@ func mergeRegions(
 	return result
 }
 
-func categorizeRegions(regions map[string][]string) map[string]string {
-	result := make(map[string]string)
+func categorizeRegions(regions map[string][]string) (map[string]CodeKind, error) {
+	result := make(map[string]CodeKind)
 	for category, kinds := range regions {
+		parsed, ok := ParseCodeKind(category)
+		if !ok {
+			return nil, fmt.Errorf("unknown region category %q", category)
+		}
 		for _, kind := range kinds {
-			result[kind] = category
+			result[kind] = parsed
 		}
 	}
-	return result
+	return result, nil
 }
 
 func validateConfiguredQuery(
@@ -186,51 +213,79 @@ func validateConfiguredQuery(
 }
 
 func languagePresets() map[string]languagePreset {
+	typescriptComments := []string{"comment"}
+	typescriptFields := []string{
+		"field_definition",
+		"property_signature",
+		"public_field_definition",
+	}
+	typescriptStatements := []string{
+		"expression_statement",
+		"lexical_declaration",
+		"return_statement",
+		"throw_statement",
+		"variable_declaration",
+	}
 	return map[string]languagePreset{
 		"javascript": {
 			name:            "javascript",
 			language:        tree_sitter.NewLanguage(tree_sitter_javascript.Language()),
 			extensions:      []string{".js", ".jsx", ".mjs", ".cjs"},
-			functionQueries: []string{javascriptFunctionQuery},
-			typeQueries:     []string{javascriptTypeQuery},
-			regions: regions(
-				[]string{"comment"},
-				[]string{"field_definition", "public_field_definition"},
-				[]string{
+			queries: languageQueries{
+				queryFunction: []string{javascriptFunctionQuery},
+				queryType:     []string{javascriptTypeQuery},
+			},
+			regions: map[CodeKind][]string{
+				CodeKindComment: []string{"comment"},
+				CodeKindField:   []string{"field_definition", "public_field_definition"},
+				CodeKindStatement: []string{
 					"expression_statement",
 					"lexical_declaration",
 					"return_statement",
 					"throw_statement",
 					"variable_declaration",
 				},
-			),
+			},
 		},
 		"typescript": {
 			name:            "typescript",
 			language:        tree_sitter.NewLanguage(tree_sitter_typescript.LanguageTypescript()),
 			extensions:      []string{".ts", ".mts", ".cts"},
-			functionQueries: []string{javascriptFunctionQuery},
-			typeQueries:     []string{typescriptTypeQuery},
-			regions:         typescriptRegions(),
+			queries: languageQueries{
+				queryFunction: []string{javascriptFunctionQuery},
+				queryType:     []string{typescriptTypeQuery},
+			},
+			regions: map[CodeKind][]string{
+				CodeKindComment:   typescriptComments,
+				CodeKindField:     typescriptFields,
+				CodeKindStatement: typescriptStatements,
+			},
 		},
 		"tsx": {
 			name:            "tsx",
 			language:        tree_sitter.NewLanguage(tree_sitter_typescript.LanguageTSX()),
 			extensions:      []string{".tsx"},
-			functionQueries: []string{javascriptFunctionQuery},
-			typeQueries:     []string{typescriptTypeQuery},
-			regions:         typescriptRegions(),
+			queries: languageQueries{
+				queryFunction: []string{javascriptFunctionQuery},
+				queryType:     []string{typescriptTypeQuery},
+			},
+			regions: map[CodeKind][]string{
+				CodeKindComment:   typescriptComments,
+				CodeKindField:     typescriptFields,
+				CodeKindStatement: typescriptStatements,
+			},
 		},
 		"python": {
 			name:            "python",
 			language:        tree_sitter.NewLanguage(tree_sitter_python.Language()),
 			extensions:      []string{".py"},
-			functionQueries: []string{pythonFunctionQuery},
-			typeQueries:     []string{pythonTypeQuery},
-			regions: regions(
-				[]string{"comment"},
-				nil,
-				[]string{
+			queries: languageQueries{
+				queryFunction: []string{pythonFunctionQuery},
+				queryType:     []string{pythonTypeQuery},
+			},
+			regions: map[CodeKind][]string{
+				CodeKindComment: []string{"comment"},
+				CodeKindStatement: []string{
 					"assignment",
 					"assert_statement",
 					"augmented_assignment",
@@ -239,18 +294,20 @@ func languagePresets() map[string]languagePreset {
 					"raise_statement",
 					"return_statement",
 				},
-			),
+			},
 		},
 		"go": {
 			name:            "go",
 			language:        tree_sitter.NewLanguage(tree_sitter_go.Language()),
 			extensions:      []string{".go"},
-			functionQueries: []string{goFunctionQuery},
-			typeQueries:     []string{goTypeQuery},
-			regions: regions(
-				[]string{"comment"},
-				[]string{"field_declaration"},
-				[]string{
+			queries: languageQueries{
+				queryFunction: []string{goFunctionQuery},
+				queryType:     []string{goTypeQuery},
+			},
+			regions: map[CodeKind][]string{
+				CodeKindComment: []string{"comment"},
+				CodeKindField:   []string{"field_declaration"},
+				CodeKindStatement: []string{
 					"assignment_statement",
 					"defer_statement",
 					"expression_statement",
@@ -261,175 +318,157 @@ func languagePresets() map[string]languagePreset {
 					"short_var_declaration",
 					"var_declaration",
 				},
-			),
+			},
 		},
 		"rust": {
 			name:               "rust",
 			language:           tree_sitter.NewLanguage(tree_sitter_rust.Language()),
 			extensions:         []string{".rs"},
-			functionQueries:    []string{rustFunctionQuery},
-			typeQueries:        []string{rustTypeQuery},
-			typeContextQueries: []string{rustImplQuery},
-			regions: regions(
-				[]string{"block_comment", "line_comment"},
-				[]string{"field_declaration"},
-				[]string{
+			queries: languageQueries{
+				queryFunction:   []string{rustFunctionQuery},
+				queryType:       []string{rustTypeQuery},
+				queryTypeContext: []string{rustImplQuery},
+			},
+			regions: map[CodeKind][]string{
+				CodeKindComment: []string{"block_comment", "line_comment"},
+				CodeKindField:   []string{"field_declaration"},
+				CodeKindStatement: []string{
 					"expression_statement",
 					"let_declaration",
 					"return_expression",
 				},
-			),
+			},
 		},
 		"java": {
 			name:            "java",
 			language:        tree_sitter.NewLanguage(tree_sitter_java.Language()),
 			extensions:      []string{".java"},
-			functionQueries: []string{javaFunctionQuery},
-			typeQueries:     []string{javaTypeQuery},
-			regions: regions(
-				[]string{"line_comment", "block_comment"},
-				[]string{"field_declaration"},
-				[]string{
+			queries: languageQueries{
+				queryFunction: []string{javaFunctionQuery},
+				queryType:     []string{javaTypeQuery},
+			},
+			regions: map[CodeKind][]string{
+				CodeKindComment: []string{"line_comment", "block_comment"},
+				CodeKindField:   []string{"field_declaration"},
+				CodeKindStatement: []string{
 					"assert_statement",
 					"expression_statement",
 					"local_variable_declaration",
 					"return_statement",
 					"throw_statement",
 				},
-			),
+			},
 		},
 		"csharp": {
 			name:            "csharp",
 			language:        tree_sitter.NewLanguage(tree_sitter_c_sharp.Language()),
 			extensions:      []string{".cs"},
-			functionQueries: []string{csharpFunctionQuery},
-			typeQueries:     []string{csharpTypeQuery},
-			regions: regions(
-				[]string{"comment"},
-				[]string{
+			queries: languageQueries{
+				queryFunction: []string{csharpFunctionQuery},
+				queryType:     []string{csharpTypeQuery},
+			},
+			regions: map[CodeKind][]string{
+				CodeKindComment: []string{"comment"},
+				CodeKindField: []string{
 					"event_field_declaration",
 					"field_declaration",
 					"property_declaration",
 				},
-				[]string{
+				CodeKindStatement: []string{
 					"expression_statement",
 					"local_declaration_statement",
 					"return_statement",
 					"throw_statement",
 					"yield_statement",
 				},
-			),
+			},
 		},
 		"ruby": {
 			name:            "ruby",
 			language:        tree_sitter.NewLanguage(tree_sitter_ruby.Language()),
 			extensions:      []string{".rb", ".rake", ".gemspec"},
-			functionQueries: []string{rubyFunctionQuery},
-			typeQueries:     []string{rubyTypeQuery},
-			regions: regions(
-				[]string{"comment"},
-				[]string{"assignment", "operator_assignment"},
-				[]string{"call", "return", "yield"},
-			),
+			queries: languageQueries{
+				queryFunction: []string{rubyFunctionQuery},
+				queryType:     []string{rubyTypeQuery},
+			},
+			regions: map[CodeKind][]string{
+				CodeKindComment:   []string{"comment"},
+				CodeKindField:     []string{"assignment", "operator_assignment"},
+				CodeKindStatement: []string{"call", "return", "yield"},
+			},
 		},
 		"php": {
 			name:            "php",
 			language:        tree_sitter.NewLanguage(tree_sitter_php.LanguagePHP()),
 			extensions:      []string{".php", ".phtml"},
-			functionQueries: []string{phpFunctionQuery},
-			typeQueries:     []string{phpTypeQuery},
-			regions: regions(
-				[]string{"comment"},
-				[]string{"property_declaration"},
-				[]string{
+			queries: languageQueries{
+				queryFunction: []string{phpFunctionQuery},
+				queryType:     []string{phpTypeQuery},
+			},
+			regions: map[CodeKind][]string{
+				CodeKindComment: []string{"comment"},
+				CodeKindField:   []string{"property_declaration"},
+				CodeKindStatement: []string{
 					"echo_statement",
 					"expression_statement",
 					"return_statement",
 					"throw_expression",
 				},
-			),
+			},
 		},
 		"kotlin": {
 			name:            "kotlin",
 			language:        tree_sitter.NewLanguage(tree_sitter_kotlin.Language()),
 			extensions:      []string{".kt", ".kts"},
-			functionQueries: []string{kotlinFunctionQuery},
-			typeQueries:     []string{kotlinTypeQuery},
-			regions: regions(
-				[]string{"line_comment", "multiline_comment"},
-				[]string{"property_declaration"},
-				[]string{"assignment", "call_expression", "jump_expression"},
-			),
+			queries: languageQueries{
+				queryFunction: []string{kotlinFunctionQuery},
+				queryType:     []string{kotlinTypeQuery},
+			},
+			regions: map[CodeKind][]string{
+				CodeKindComment:   []string{"line_comment", "multiline_comment"},
+				CodeKindField:     []string{"property_declaration"},
+				CodeKindStatement: []string{"assignment", "call_expression", "jump_expression"},
+			},
 		},
 		"c": {
 			name:            "c",
 			language:        tree_sitter.NewLanguage(tree_sitter_c.Language()),
 			extensions:      []string{".c"},
-			functionQueries: []string{cFunctionQuery},
-			typeQueries:     []string{cTypeQuery},
-			regions:         cRegions(),
+			queries: languageQueries{
+				queryFunction: []string{cFunctionQuery},
+				queryType:     []string{cTypeQuery},
+			},
+			regions: map[CodeKind][]string{
+				CodeKindComment: []string{"comment"},
+				CodeKindField:   []string{"field_declaration"},
+				CodeKindStatement: []string{
+					"declaration",
+					"expression_statement",
+					"goto_statement",
+					"return_statement",
+				},
+			},
 		},
 		"cpp": {
 			name:            "cpp",
 			language:        tree_sitter.NewLanguage(tree_sitter_cpp.Language()),
 			extensions:      []string{".cc", ".cpp", ".cxx", ".h", ".hpp", ".hxx"},
-			functionQueries: []string{cppFunctionQuery},
-			typeQueries:     []string{cppTypeQuery},
-			regions: regions(
-				[]string{"comment"},
-				[]string{"field_declaration"},
-				[]string{
+			queries: languageQueries{
+				queryFunction: []string{cppFunctionQuery},
+				queryType:     []string{cppTypeQuery},
+			},
+			regions: map[CodeKind][]string{
+				CodeKindComment: []string{"comment"},
+				CodeKindField:   []string{"field_declaration"},
+				CodeKindStatement: []string{
 					"co_return_statement",
 					"declaration",
 					"expression_statement",
 					"return_statement",
 					"throw_statement",
 				},
-			),
+			},
 		},
-	}
-}
-
-func typescriptRegions() map[string][]string {
-	return regions(
-		[]string{"comment"},
-		[]string{
-			"field_definition",
-			"property_signature",
-			"public_field_definition",
-		},
-		[]string{
-			"expression_statement",
-			"lexical_declaration",
-			"return_statement",
-			"throw_statement",
-			"variable_declaration",
-		},
-	)
-}
-
-func cRegions() map[string][]string {
-	return regions(
-		[]string{"comment"},
-		[]string{"field_declaration"},
-		[]string{
-			"declaration",
-			"expression_statement",
-			"goto_statement",
-			"return_statement",
-		},
-	)
-}
-
-func regions(
-	comments []string,
-	fields []string,
-	statements []string,
-) map[string][]string {
-	return map[string][]string{
-		"comment":   comments,
-		"field":     fields,
-		"statement": statements,
 	}
 }
 

@@ -25,6 +25,7 @@ go run ./cmd/jevlint check --fix .
 
 | Flag | Description |
 | --- | --- |
+| `--changed` | Check only git-modified files (staged, unstaged, and untracked). `--fix` still verifies the whole project through `jevlint_check`. |
 | `--clear-cache` | Clear this project's cached evaluations before checking. New results are cached. |
 | `--color auto\|always\|never` | Control colored text output. Defaults to `auto`. |
 | `--config path` | Use a different rule file. Its directory becomes the project root. |

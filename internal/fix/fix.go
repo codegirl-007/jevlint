@@ -3,6 +3,7 @@ package fix
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -20,23 +21,43 @@ import (
 	"jevlint/internal/runner"
 )
 
-const diagnosticLimit = 64 * 1024
+const (
+	diagnosticLimit  = 64 * 1024
+	acpClientName    = "jevlint"
+	acpClientVersion = "dev"
+	acpCloseTimeout  = time.Second
+)
+
+type AgentFeedback struct {
+	Progress func(string)
+	Message  func(string)
+	Tool     func(string)
+}
+
+type PathFilter struct {
+	Context []string
+	Exclude []string
+}
+
+type Workspace struct {
+	Root       string
+	ConfigPath string
+	Paths      PathFilter
+}
+
+type AgentSession struct {
+	Command  []string
+	Feedback AgentFeedback
+}
 
 type Options struct {
-	Root         string
-	ConfigPath   string
-	Command      []string
-	Context      []string
-	Exclude      []string
-	Findings     []runner.Finding
-	Progress     func(string)
-	AgentMessage func(string)
-	ToolActivity func(string)
+	Workspace Workspace
+	Agent     AgentSession
+	Findings  []runner.Finding
 }
 
 type Proposal struct {
-	Changes  []FileChange
-	Messages []string
+	Changes []FileChange
 }
 
 type FileChange struct {
@@ -58,72 +79,75 @@ func ValidateSyntax(
 }
 
 func Generate(ctx context.Context, options Options) (Proposal, error) {
-	root, err := filepath.Abs(options.Root)
+	root, err := filepath.Abs(options.Workspace.Root)
 	if err != nil {
 		return Proposal{}, fmt.Errorf("resolve project root: %w", err)
 	}
-	if len(options.Command) == 0 {
+	if len(options.Agent.Command) == 0 {
 		return Proposal{}, fmt.Errorf("ACP agent command is required")
 	}
-	reportProgress(options.Progress, "recording project snapshot")
+	if options.Agent.Feedback.Progress != nil {
+		options.Agent.Feedback.Progress("recording project snapshot")
+	}
 	snapshot, err := snapshotProject(root, options)
 	if err != nil {
 		return Proposal{}, err
 	}
-	writable := writablePaths(root, snapshot.files)
+	writable := writablePaths(root, snapshot)
 	client := &acpClient{
 		root:         root,
 		writable:     writable,
-		progress:     options.Progress,
-		agentMessage: options.AgentMessage,
-		toolActivity: options.ToolActivity,
+		progress:     options.Agent.Feedback.Progress,
+		agentMessage: options.Agent.Feedback.Message,
+		toolActivity: options.Agent.Feedback.Tool,
 	}
-	mcpServers, err := sessionMCPServers(root, options.ConfigPath)
+	mcpServers, err := sessionMCPServers(root, options.Workspace.ConfigPath)
 	if err != nil {
 		return Proposal{}, err
 	}
-	reportProgress(options.Progress, "starting ACP agent")
-	reportProgress(options.Progress, "waiting for ACP agent to propose edits")
+	if options.Agent.Feedback.Progress != nil {
+		options.Agent.Feedback.Progress("starting ACP agent")
+		options.Agent.Feedback.Progress("waiting for ACP agent to propose edits")
+	}
 	if err := runACP(
 		ctx,
 		root,
-		options.Command,
+		options.Agent.Command,
 		buildPrompt(options.Findings),
 		client,
 		mcpServers,
 	); err != nil {
-		if restoreErr := restoreProject(root, snapshot); restoreErr != nil {
-			return Proposal{}, fmt.Errorf("%w (restore failed: %v)", err, restoreErr)
-		}
-		return Proposal{}, err
+		return Proposal{}, restoreAfterFailure(root, snapshot, err)
 	}
-	reportProgress(options.Progress, "inspecting proposed changes")
+	if options.Agent.Feedback.Progress != nil {
+		options.Agent.Feedback.Progress("inspecting proposed changes")
+	}
 	changes, err := changedFiles(root, snapshot)
 	if err != nil {
-		if restoreErr := restoreProject(root, snapshot); restoreErr != nil {
-			return Proposal{}, fmt.Errorf("%w (restore failed: %v)", err, restoreErr)
-		}
-		return Proposal{}, err
+		return Proposal{}, restoreAfterFailure(root, snapshot, err)
 	}
-	return Proposal{
-		Changes:  changes,
-		Messages: client.collectedMessages(),
-	}, nil
+	return Proposal{Changes: changes}, nil
 }
 
-func reportProgress(progress func(string), message string) {
-	if progress != nil {
-		progress(message)
+func restoreAfterFailure(root string, snapshot projectSnapshot, err error) error {
+	if restoreErr := removeUnknownProjectFiles(root, snapshot); restoreErr != nil {
+		return fmt.Errorf("%w (restore failed: %v)", err, restoreErr)
 	}
+	if restoreErr := restoreSnapshotFiles(root, snapshot); restoreErr != nil {
+		return fmt.Errorf("%w (restore failed: %v)", err, restoreErr)
+	}
+	return err
 }
 
 func writablePaths(
 	root string,
-	files map[string]snapshotFile,
+	snapshot projectSnapshot,
 ) map[string]struct{} {
-	writable := make(map[string]struct{}, len(files))
-	for relative := range files {
-		writable[filepath.Join(root, filepath.FromSlash(relative))] = struct{}{}
+	writable := make(map[string]struct{}, len(snapshot.paths))
+	for relative, entry := range snapshot.paths {
+		if entry.captured {
+			writable[filepath.Join(root, filepath.FromSlash(relative))] = struct{}{}
+		}
 	}
 	return writable
 }
@@ -135,39 +159,55 @@ func changedFiles(
 	if err := rejectUnexpectedFiles(root, snapshot); err != nil {
 		return nil, err
 	}
-	paths := make([]string, 0, len(snapshot.files))
-	for path := range snapshot.files {
-		paths = append(paths, path)
+	paths := make([]string, 0, len(snapshot.paths))
+	for path, entry := range snapshot.paths {
+		if entry.captured {
+			paths = append(paths, path)
+		}
 	}
 	sort.Strings(paths)
 
 	changes := make([]FileChange, 0)
 	for _, relative := range paths {
-		path := filepath.Join(root, filepath.FromSlash(relative))
-		info, err := os.Lstat(path)
+		change, changed, err := snapshotFileChange(root, relative, snapshot.paths[relative].file)
 		if err != nil {
-			return nil, fmt.Errorf("ACP agent removed %q", relative)
+			return nil, err
 		}
-		if !info.Mode().IsRegular() {
-			return nil, fmt.Errorf(
-				"ACP agent replaced %q with a non-regular file",
-				relative,
-			)
+		if changed {
+			changes = append(changes, change)
 		}
-		after, err := os.ReadFile(path)
-		if err != nil {
-			return nil, fmt.Errorf("read ACP result %q: %w", relative, err)
-		}
-		if bytes.Equal(snapshot.files[relative].content, after) {
-			continue
-		}
-		changes = append(changes, FileChange{
-			Path:   relative,
-			Before: snapshot.files[relative].content,
-			After:  after,
-		})
 	}
 	return changes, nil
+}
+
+func snapshotFileChange(
+	root string,
+	relative string,
+	before snapshotFile,
+) (FileChange, bool, error) {
+	path := filepath.Join(root, filepath.FromSlash(relative))
+	info, err := os.Lstat(path)
+	if err != nil {
+		return FileChange{}, false, fmt.Errorf("ACP agent removed %q", relative)
+	}
+	if !info.Mode().IsRegular() {
+		return FileChange{}, false, fmt.Errorf(
+			"ACP agent replaced %q with a non-regular file",
+			relative,
+		)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		return FileChange{}, false, fmt.Errorf("read ACP result %q: %w", relative, err)
+	}
+	if bytes.Equal(before.content, after) {
+		return FileChange{}, false, nil
+	}
+	return FileChange{
+		Path:   relative,
+		Before: before.content,
+		After:  after,
+	}, true, nil
 }
 
 func rejectUnexpectedFiles(root string, snapshot projectSnapshot) error {
@@ -177,7 +217,7 @@ func rejectUnexpectedFiles(root string, snapshot projectSnapshot) error {
 	}
 	for _, relative := range current {
 		relative = filepath.ToSlash(relative)
-		if _, ok := snapshot.known[relative]; !ok {
+		if _, ok := snapshot.paths[relative]; !ok {
 			return fmt.Errorf("ACP agent created unexpected file %q", relative)
 		}
 	}
@@ -211,45 +251,81 @@ func runACP(
 	client *acpClient,
 	mcpServers []acp.McpServer,
 ) error {
-	process := exec.CommandContext(ctx, command[0], command[1:]...)
-	process.Dir = workspace
-	process.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	stdin, err := process.StdinPipe()
+	process, stdin, stdout, diagnostics, err := startACPProcess(ctx, workspace, command)
 	if err != nil {
-		return fmt.Errorf("open ACP stdin: %w", err)
-	}
-	stdout, err := process.StdoutPipe()
-	if err != nil {
-		return fmt.Errorf("open ACP stdout: %w", err)
-	}
-	diagnostics := &limitedBuffer{limit: diagnosticLimit}
-	process.Stderr = diagnostics
-	if err := process.Start(); err != nil {
-		return fmt.Errorf("start ACP agent: %w", err)
+		return err
 	}
 
 	connection := acp.NewClientSideConnection(client, stdin, stdout)
 	connection.SetLogger(slog.New(slog.NewTextHandler(io.Discard, nil)))
 	sessionErr := runACPSession(ctx, connection, workspace, prompt, mcpServers)
-	_ = stdin.Close()
-	stopACPProcess(process)
+	closeErr := stdin.Close()
+	stopErr := stopACPProcess(process)
 	if sessionErr != nil {
-		detail := strings.TrimSpace(diagnostics.String())
+		detail := strings.TrimSpace(diagnostics.buffer.String())
 		if detail != "" {
 			return fmt.Errorf("%w: %s", sessionErr, detail)
 		}
 		return sessionErr
 	}
-	return nil
+	return errors.Join(closeErr, stopErr)
 }
 
-func stopACPProcess(process *exec.Cmd) {
-	if process == nil || process.Process == nil {
-		return
+func startACPProcess(
+	ctx context.Context,
+	workspace string,
+	command []string,
+) (*exec.Cmd, io.WriteCloser, io.ReadCloser, *limitedBuffer, error) {
+	process := exec.CommandContext(ctx, command[0], command[1:]...)
+	process.Dir = workspace
+	process.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	stdin, err := process.StdinPipe()
+	if err != nil {
+		return nil, nil, nil, nil, fmt.Errorf("open ACP stdin: %w", err)
 	}
-	_ = syscall.Kill(-process.Process.Pid, syscall.SIGKILL)
-	_ = process.Process.Kill()
-	_ = process.Wait()
+	stdout, err := process.StdoutPipe()
+	if err != nil {
+		return nil, nil, nil, nil, fmt.Errorf("open ACP stdout: %w", err)
+	}
+	diagnostics := &limitedBuffer{limit: diagnosticLimit}
+	process.Stderr = diagnostics
+	if err := process.Start(); err != nil {
+		return nil, nil, nil, nil, fmt.Errorf("start ACP agent: %w", err)
+	}
+	return process, stdin, stdout, diagnostics, nil
+}
+
+func stopACPProcess(process *exec.Cmd) error {
+	if process == nil || process.Process == nil {
+		return nil
+	}
+	var errs []error
+	if err := syscall.Kill(-process.Process.Pid, syscall.SIGKILL); err != nil && !processAlreadyGone(err) {
+		errs = append(errs, err)
+	}
+	if err := process.Process.Kill(); err != nil && !processAlreadyGone(err) {
+		errs = append(errs, err)
+	}
+	if err := process.Wait(); err != nil && !expectedKillWait(err) {
+		errs = append(errs, err)
+	}
+	return errors.Join(errs...)
+}
+
+func processAlreadyGone(err error) bool {
+	return errors.Is(err, os.ErrProcessDone) || errors.Is(err, syscall.ESRCH)
+}
+
+func expectedKillWait(err error) bool {
+	if processAlreadyGone(err) {
+		return true
+	}
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) {
+		return false
+	}
+	status, ok := exitErr.Sys().(syscall.WaitStatus)
+	return ok && status.Signaled() && status.Signal() == syscall.SIGKILL
 }
 
 func runACPSession(
@@ -262,8 +338,8 @@ func runACPSession(
 	response, err := connection.Initialize(ctx, acp.InitializeRequest{
 		ProtocolVersion: acp.ProtocolVersionNumber,
 		ClientInfo: &acp.Implementation{
-			Name:    "jevlint",
-			Version: "dev",
+			Name:    acpClientName,
+			Version: acpClientVersion,
 		},
 		ClientCapabilities: acp.ClientCapabilities{
 			Fs: acp.FileSystemCapabilities{
@@ -298,12 +374,15 @@ func runACPSession(
 	if response.AgentCapabilities.SessionCapabilities.Close != nil {
 		closeContext, cancel := context.WithTimeout(
 			context.Background(),
-			time.Second,
+			acpCloseTimeout,
 		)
-		_, _ = connection.CloseSession(closeContext, acp.CloseSessionRequest{
+		_, closeErr := connection.CloseSession(closeContext, acp.CloseSessionRequest{
 			SessionId: session.SessionId,
 		})
 		cancel()
+		if closeErr != nil && !errors.Is(closeErr, context.DeadlineExceeded) {
+			return fmt.Errorf("close ACP session: %w", closeErr)
+		}
 	}
 	if result.StopReason != acp.StopReasonEndTurn {
 		return fmt.Errorf("ACP agent stopped with reason %q", result.StopReason)
@@ -357,13 +436,11 @@ func (buffer *limitedBuffer) Write(content []byte) (int, error) {
 	originalLength := len(content)
 	remaining := buffer.limit - buffer.buffer.Len()
 	if remaining > 0 {
-		_, _ = buffer.buffer.Write(content[:min(remaining, len(content))])
+		if _, err := buffer.buffer.Write(content[:min(remaining, len(content))]); err != nil {
+			return 0, err
+		}
 	}
 	return originalLength, nil
-}
-
-func (buffer *limitedBuffer) String() string {
-	return buffer.buffer.String()
 }
 
 var _ io.Writer = (*limitedBuffer)(nil)

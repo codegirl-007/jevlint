@@ -28,27 +28,39 @@ func Apply(root string, changes []FileChange) error {
 	return nil
 }
 
+const (
+	restoreFilePerm = 0o600
+	restoreDirPerm  = 0o700
+)
+
 func RestoreChanges(root string, changes []FileChange) error {
 	root, err := filepath.Abs(root)
 	if err != nil {
 		return fmt.Errorf("resolve project root: %w", err)
 	}
 	for _, change := range changes {
-		relative := filepath.ToSlash(filepath.Clean(change.Path))
-		if !filepath.IsLocal(filepath.FromSlash(relative)) {
-			return fmt.Errorf("restore path escapes project root: %q", change.Path)
+		if err := restoreChange(root, change); err != nil {
+			return err
 		}
-		path := filepath.Join(root, filepath.FromSlash(relative))
-		perm := os.FileMode(0o600)
-		if info, err := os.Lstat(path); err == nil && info.Mode().IsRegular() {
-			perm = info.Mode().Perm()
-		}
-		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-			return fmt.Errorf("restore directory for %q: %w", relative, err)
-		}
-		if err := os.WriteFile(path, change.Before, perm); err != nil {
-			return fmt.Errorf("restore %q: %w", relative, err)
-		}
+	}
+	return nil
+}
+
+func restoreChange(root string, change FileChange) error {
+	relative := filepath.ToSlash(filepath.Clean(change.Path))
+	if !filepath.IsLocal(filepath.FromSlash(relative)) {
+		return fmt.Errorf("restore path escapes project root: %q", change.Path)
+	}
+	path := filepath.Join(root, filepath.FromSlash(relative))
+	perm := os.FileMode(restoreFilePerm)
+	if info, err := os.Lstat(path); err == nil && info.Mode().IsRegular() {
+		perm = info.Mode().Perm()
+	}
+	if err := os.MkdirAll(filepath.Dir(path), restoreDirPerm); err != nil {
+		return fmt.Errorf("restore directory for %q: %w", relative, err)
+	}
+	if err := os.WriteFile(path, change.Before, perm); err != nil {
+		return fmt.Errorf("restore %q: %w", relative, err)
 	}
 	return nil
 }

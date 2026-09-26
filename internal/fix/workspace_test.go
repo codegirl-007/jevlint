@@ -58,8 +58,8 @@ func TestSnapshotProjectBuildsSafeProjectSnapshot(t *testing.T) {
 		"sample_test.go",
 		"scripts/check",
 	} {
-		if _, ok := snapshot.files[expected]; !ok {
-			t.Errorf("snapshot is missing %q: %#v", expected, snapshot.files)
+		if entry, ok := snapshot.paths[expected]; !ok || !entry.captured {
+			t.Errorf("snapshot is missing %q: %#v", expected, snapshot.paths)
 		}
 	}
 	for _, excluded := range []string{
@@ -69,12 +69,12 @@ func TestSnapshotProjectBuildsSafeProjectSnapshot(t *testing.T) {
 		"nested/drop.generated",
 		"node_modules/dependency.js",
 	} {
-		if _, ok := snapshot.files[excluded]; ok {
+		if entry, ok := snapshot.paths[excluded]; ok && entry.captured {
 			t.Errorf("snapshot contains excluded path %q", excluded)
 		}
 	}
-	if snapshot.files["scripts/check"].perm != 0o700 {
-		t.Fatalf("snapshot script mode = %o, want 700", snapshot.files["scripts/check"].perm)
+	if snapshot.paths["scripts/check"].file.perm != 0o700 {
+		t.Fatalf("snapshot script mode = %o, want 700", snapshot.paths["scripts/check"].file.perm)
 	}
 }
 
@@ -93,21 +93,25 @@ func TestSnapshotProjectAppliesContextAndExcludePatterns(t *testing.T) {
 	}
 
 	snapshot, err := snapshotProject(root, Options{
-		ConfigPath: filepath.Join(root, "jevlint.json"),
-		Context:    []string{"docs/**"},
-		Exclude:    []string{"docs/private/**"},
-		Findings:   []runner.Finding{testFinding()},
+		Workspace: Workspace{
+			ConfigPath: filepath.Join(root, "jevlint.json"),
+			Paths: PathFilter{
+				Context: []string{"docs/**"},
+				Exclude: []string{"docs/private/**"},
+			},
+		},
+		Findings: []runner.Finding{testFinding()},
 	})
 	if err != nil {
 		t.Fatalf("snapshotProject() error = %v", err)
 	}
 	for _, expected := range []string{"docs/public.md", "jevlint.json", "sample.go"} {
-		if _, ok := snapshot.files[expected]; !ok {
-			t.Errorf("snapshot is missing required path %q: %#v", expected, snapshot.files)
+		if entry, ok := snapshot.paths[expected]; !ok || !entry.captured {
+			t.Errorf("snapshot is missing required path %q: %#v", expected, snapshot.paths)
 		}
 	}
 	for _, excluded := range []string{"docs/private/note.md", "sibling.go"} {
-		if _, ok := snapshot.files[excluded]; ok {
+		if entry, ok := snapshot.paths[excluded]; ok && entry.captured {
 			t.Errorf("snapshot contains excluded path %q", excluded)
 		}
 	}

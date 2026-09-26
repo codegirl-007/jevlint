@@ -72,7 +72,7 @@ func TestTypeSafeEvaluateBatchesRules(t *testing.T) {
 		if !strings.Contains(payload.Questions["database-joins"].Instructions, "different databases") {
 			t.Errorf("instructions = %q", payload.Questions["database-joins"].Instructions)
 		}
-		if payload.Questions["semicolons"].Criteria["fail"] == "" {
+		if payload.Questions["semicolons"].Criteria.Fail == "" {
 			t.Errorf("fail criterion is missing")
 		}
 
@@ -134,7 +134,7 @@ func TestTypeSafeEvaluateExplainsRegionContext(t *testing.T) {
 	batch.CodeUnit = parsing.CodeUnit{
 		Kind:         parsing.CodeKindField,
 		Name:         "FeatureFlags:field_declaration",
-		Language:     "go",
+		Language:     parsing.SourceLanguageGo,
 		Path:         "flags.go",
 		Source:       "Enabled bool",
 		ParentSource: "type FeatureFlags struct {\n\tEnabled bool\n}",
@@ -157,11 +157,11 @@ func TestTypeSafeCacheKeyTracksExactEvaluationInput(t *testing.T) {
 	client, err := NewTypeSafe(TypeSafeOptions{
 		APIKey:  "sk-one",
 		BaseURL: "https://one.example",
-		Model:   "jev-one",
 	})
 	if err != nil {
 		t.Fatalf("NewTypeSafe() error = %v", err)
 	}
+	client.model = "jev-one"
 	body, err := client.requestBody(testBatch())
 	if err != nil {
 		t.Fatalf("requestBody() error = %v", err)
@@ -240,31 +240,32 @@ func TestTypeSafeCacheKeyTracksExactEvaluationInput(t *testing.T) {
 		})
 	}
 
-	for name, options := range map[string]TypeSafeOptions{
+	for name, test := range map[string]struct {
+		options TypeSafeOptions
+		model   string
+	}{
 		"endpoint": {
-			APIKey:  "sk-one",
-			BaseURL: "https://two.example",
-			Model:   "jev-one",
+			options: TypeSafeOptions{APIKey: "sk-one", BaseURL: "https://two.example"},
+			model:   "jev-one",
 		},
 		"model": {
-			APIKey:  "sk-one",
-			BaseURL: "https://one.example",
-			Model:   "jev-two",
+			options: TypeSafeOptions{APIKey: "sk-one", BaseURL: "https://one.example"},
+			model:   "jev-two",
 		},
 		"credential": {
-			APIKey:  "sk-two",
-			BaseURL: "https://one.example",
-			Model:   "jev-one",
+			options: TypeSafeOptions{APIKey: "sk-two", BaseURL: "https://one.example"},
+			model:   "jev-one",
 		},
 	} {
-		name, options := name, options
+		name, test := name, test
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 
-			other, err := NewTypeSafe(options)
+			other, err := NewTypeSafe(test.options)
 			if err != nil {
 				t.Fatalf("NewTypeSafe() error = %v", err)
 			}
+			other.model = test.model
 			if otherKey := other.cacheKey(body); otherKey == key {
 				t.Fatalf("%s change did not change cache key", name)
 			}
@@ -653,14 +654,14 @@ func newTestClient(
 
 	client, err := NewTypeSafe(TypeSafeOptions{
 		APIKey:     "sk-test",
-		BaseURL:    server.URL,
-		Model:      "jev-test",
+		BaseURL:    ServiceURL(server.URL),
 		HTTPClient: server.Client(),
 		Sleep:      sleep,
 	})
 	if err != nil {
 		t.Fatalf("NewTypeSafe() error = %v", err)
 	}
+	client.model = "jev-test"
 	return client
 }
 
@@ -674,8 +675,7 @@ func newCachedTestClient(
 
 	client, err := NewTypeSafe(TypeSafeOptions{
 		APIKey:     "sk-test",
-		BaseURL:    server.URL,
-		Model:      "jev-test",
+		BaseURL:    ServiceURL(server.URL),
 		HTTPClient: server.Client(),
 		Cache:      cache,
 		Refresh:    refresh,
@@ -683,6 +683,7 @@ func newCachedTestClient(
 	if err != nil {
 		t.Fatalf("NewTypeSafe() error = %v", err)
 	}
+	client.model = "jev-test"
 	return client
 }
 
@@ -702,7 +703,7 @@ func testBatch() Batch {
 		CodeUnit: parsing.CodeUnit{
 			Kind:      parsing.CodeKindFunction,
 			Name:      "JoinUsers",
-			Language:  "go",
+			Language:  parsing.SourceLanguageGo,
 			Path:      "store.go",
 			Source:    "// Joins users.\nfunc JoinUsers(user User) {}",
 			StartLine: 3,

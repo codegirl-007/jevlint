@@ -7,7 +7,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 
 	acp "github.com/coder/acp-go-sdk"
 )
@@ -18,8 +17,6 @@ type acpClient struct {
 	progress     func(string)
 	agentMessage func(string)
 	toolActivity func(string)
-	mu           sync.Mutex
-	messages     []string
 }
 
 func (client *acpClient) ReadTextFile(
@@ -75,14 +72,18 @@ func (client *acpClient) RequestPermission(
 			request.Options,
 			acp.PermissionOptionKindAllowOnce,
 		); ok {
-			return selectedPermission(option), nil
+			return acp.RequestPermissionResponse{
+				Outcome: acp.NewRequestPermissionOutcomeSelected(option.OptionId),
+			}, nil
 		}
 	}
 	if option, ok := permissionOption(
 		request.Options,
 		acp.PermissionOptionKindRejectOnce,
 	); ok {
-		return selectedPermission(option), nil
+		return acp.RequestPermissionResponse{
+			Outcome: acp.NewRequestPermissionOutcomeSelected(option.OptionId),
+		}, nil
 	}
 	return acp.RequestPermissionResponse{
 		Outcome: acp.NewRequestPermissionOutcomeCancelled(),
@@ -95,10 +96,14 @@ func (client *acpClient) SessionUpdate(
 ) error {
 	update := notification.Update
 	if update.ToolCall != nil && update.ToolCall.Title != "" {
-		reportProgress(client.toolActivity, update.ToolCall.Title)
+		if client.toolActivity != nil {
+			client.toolActivity(update.ToolCall.Title)
+		}
 	}
 	if update.ToolCallUpdate != nil && update.ToolCallUpdate.Title != nil {
-		reportProgress(client.toolActivity, *update.ToolCallUpdate.Title)
+		if client.toolActivity != nil {
+			client.toolActivity(*update.ToolCallUpdate.Title)
+		}
 	}
 	if update.AgentMessageChunk == nil ||
 		update.AgentMessageChunk.Content.Text == nil {
@@ -108,13 +113,6 @@ func (client *acpClient) SessionUpdate(
 	if client.agentMessage != nil {
 		client.agentMessage(rawText)
 	}
-	text := strings.TrimSpace(rawText)
-	if text == "" {
-		return nil
-	}
-	client.mu.Lock()
-	client.messages = append(client.messages, text)
-	client.mu.Unlock()
 	return nil
 }
 
@@ -191,12 +189,6 @@ func requireRegularContainedFile(root string, path string) error {
 	return fmt.Errorf("ACP path is not a regular file: %q", path)
 }
 
-func (client *acpClient) collectedMessages() []string {
-	client.mu.Lock()
-	defer client.mu.Unlock()
-	return append([]string(nil), client.messages...)
-}
-
 func selectedLines(content string, line *int, limit *int) string {
 	if line == nil && limit == nil {
 		return content
@@ -260,10 +252,3 @@ func permissionOption(
 	return acp.PermissionOption{}, false
 }
 
-func selectedPermission(
-	option acp.PermissionOption,
-) acp.RequestPermissionResponse {
-	return acp.RequestPermissionResponse{
-		Outcome: acp.NewRequestPermissionOutcomeSelected(option.OptionId),
-	}
-}

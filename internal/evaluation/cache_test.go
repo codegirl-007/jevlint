@@ -28,7 +28,7 @@ func TestFileCacheRoundTripUsesPrivateAtomicStorage(t *testing.T) {
 	if permissions := rootInfo.Mode().Perm(); permissions != 0o700 {
 		t.Fatalf("cache root permissions = %o, want 700", permissions)
 	}
-	entryInfo, err := os.Stat(cache.entryPath("key"))
+	entryInfo, err := os.Stat(filepath.Join(cache.root, "key"+cacheEntryExtension))
 	if err != nil {
 		t.Fatalf("stat cache entry: %v", err)
 	}
@@ -36,7 +36,7 @@ func TestFileCacheRoundTripUsesPrivateAtomicStorage(t *testing.T) {
 		t.Fatalf("cache entry permissions = %o, want 600", permissions)
 	}
 
-	data, err := os.ReadFile(cache.entryPath("key"))
+	data, err := os.ReadFile(filepath.Join(cache.root, "key"+cacheEntryExtension))
 	if err != nil {
 		t.Fatalf("read cache entry: %v", err)
 	}
@@ -89,7 +89,7 @@ func TestFileCacheRejectsCorruptInvalidAndOldEntries(t *testing.T) {
 			if err != nil {
 				t.Fatalf("newFileCacheAt() error = %v", err)
 			}
-			path := cache.entryPath("key")
+			path := filepath.Join(cache.root, "key"+cacheEntryExtension)
 			if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
 				t.Fatalf("write cache entry: %v", err)
 			}
@@ -141,15 +141,15 @@ func TestNewFileCacheScopesByAbsoluteProjectRoot(t *testing.T) {
 
 	firstProject := t.TempDir()
 	secondProject := t.TempDir()
-	first, err := NewFileCache(firstProject)
+	first, err := NewFileCache(firstProject, os.UserCacheDir)
 	if err != nil {
 		t.Fatalf("NewFileCache() error = %v", err)
 	}
-	same, err := NewFileCache(filepath.Join(firstProject, "."))
+	same, err := NewFileCache(filepath.Join(firstProject, "."), os.UserCacheDir)
 	if err != nil {
 		t.Fatalf("NewFileCache() error = %v", err)
 	}
-	second, err := NewFileCache(secondProject)
+	second, err := NewFileCache(secondProject, os.UserCacheDir)
 	if err != nil {
 		t.Fatalf("NewFileCache() error = %v", err)
 	}

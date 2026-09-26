@@ -183,8 +183,7 @@ func TestDecodeValidationErrors(t *testing.T) {
 				"severity": "info",
 				"localize": ["banana"]
 			}]}`,
-			want: `rules[0].localize contains invalid category "banana"; ` +
-				"want comment, field, or statement",
+			want: `decode config: invalid kind "banana"`,
 		},
 		"invalid code unit kind": {
 			input: `{"rules": [{
@@ -193,8 +192,7 @@ func TestDecodeValidationErrors(t *testing.T) {
 				"severity": "info",
 				"kinds": ["banana"]
 			}]}`,
-			want: `rules[0].kinds contains invalid kind "banana"; ` +
-				"want comment, field, function, statement, or type",
+			want: `decode config: invalid kind "banana"`,
 		},
 	}
 

@@ -1,6 +1,7 @@
 package parsing
 
 import (
+	"encoding/json"
 	"fmt"
 	"path/filepath"
 	"sort"
@@ -12,11 +13,11 @@ import (
 type CodeUnit struct {
 	Kind         CodeKind          `json:"kind"`
 	Name         string            `json:"name"`
-	Language     string            `json:"language"`
+	Language     SourceLanguage    `json:"language"`
 	Path         string            `json:"path"`
 	Source       string            `json:"source"`
 	ParentSource string            `json:"parentSource,omitempty"`
-	RegionKind   string            `json:"regionKind,omitempty"`
+	RegionKind   NodeKind          `json:"regionKind,omitempty"`
 	StartLine    uint              `json:"startLine"`
 	EndLine      uint              `json:"endLine"`
 	StartColumn  uint              `json:"startColumn"`
@@ -27,20 +28,182 @@ type CodeUnit struct {
 	Regions      []Region          `json:"-"`
 }
 
-type CodeKind string
+type CodeKind int
 
 const (
-	CodeKindFunction  CodeKind = "function"
-	CodeKindType      CodeKind = "type"
-	CodeKindComment   CodeKind = "comment"
-	CodeKindField     CodeKind = "field"
-	CodeKindStatement CodeKind = "statement"
-	CodeKindRegion    CodeKind = "region"
+	CodeKindUnknown CodeKind = iota
+	CodeKindFunction
+	CodeKindType
+	CodeKindComment
+	CodeKindField
+	CodeKindStatement
+	CodeKindRegion
 )
 
+func (kind CodeKind) String() string {
+	switch kind {
+	case CodeKindFunction:
+		return "function"
+	case CodeKindType:
+		return "type"
+	case CodeKindComment:
+		return "comment"
+	case CodeKindField:
+		return "field"
+	case CodeKindStatement:
+		return "statement"
+	case CodeKindRegion:
+		return "region"
+	default:
+		return "unknown"
+	}
+}
+
+func (kind CodeKind) MarshalJSON() ([]byte, error) {
+	return json.Marshal(kind.String())
+}
+
+func (kind *CodeKind) UnmarshalJSON(data []byte) error {
+	var value string
+	if err := json.Unmarshal(data, &value); err != nil {
+		return err
+	}
+	parsed, ok := ParseCodeKind(value)
+	if !ok {
+		return fmt.Errorf("invalid code kind %q", value)
+	}
+	*kind = parsed
+	return nil
+}
+
+func ParseCodeKind(value string) (CodeKind, bool) {
+	switch value {
+	case "function":
+		return CodeKindFunction, true
+	case "type":
+		return CodeKindType, true
+	case "comment":
+		return CodeKindComment, true
+	case "field":
+		return CodeKindField, true
+	case "statement":
+		return CodeKindStatement, true
+	case "region":
+		return CodeKindRegion, true
+	default:
+		return CodeKindUnknown, false
+	}
+}
+
+type SourceLanguage int
+
+const (
+	SourceLanguageUnknown SourceLanguage = iota
+	SourceLanguageC
+	SourceLanguageCPP
+	SourceLanguageCSharp
+	SourceLanguageGo
+	SourceLanguageJava
+	SourceLanguageJavaScript
+	SourceLanguageKotlin
+	SourceLanguagePHP
+	SourceLanguagePython
+	SourceLanguageRuby
+	SourceLanguageRust
+	SourceLanguageTSX
+	SourceLanguageTypeScript
+)
+
+func (language SourceLanguage) String() string {
+	switch language {
+	case SourceLanguageC:
+		return "c"
+	case SourceLanguageCPP:
+		return "cpp"
+	case SourceLanguageCSharp:
+		return "csharp"
+	case SourceLanguageGo:
+		return "go"
+	case SourceLanguageJava:
+		return "java"
+	case SourceLanguageJavaScript:
+		return "javascript"
+	case SourceLanguageKotlin:
+		return "kotlin"
+	case SourceLanguagePHP:
+		return "php"
+	case SourceLanguagePython:
+		return "python"
+	case SourceLanguageRuby:
+		return "ruby"
+	case SourceLanguageRust:
+		return "rust"
+	case SourceLanguageTSX:
+		return "tsx"
+	case SourceLanguageTypeScript:
+		return "typescript"
+	default:
+		return "unknown"
+	}
+}
+
+func (language SourceLanguage) MarshalJSON() ([]byte, error) {
+	return json.Marshal(language.String())
+}
+
+func (language *SourceLanguage) UnmarshalJSON(data []byte) error {
+	var value string
+	if err := json.Unmarshal(data, &value); err != nil {
+		return err
+	}
+	parsed, ok := ParseSourceLanguage(value)
+	if !ok {
+		return fmt.Errorf("invalid source language %q", value)
+	}
+	*language = parsed
+	return nil
+}
+
+func ParseSourceLanguage(value string) (SourceLanguage, bool) {
+	switch value {
+	case "c":
+		return SourceLanguageC, true
+	case "cpp":
+		return SourceLanguageCPP, true
+	case "csharp":
+		return SourceLanguageCSharp, true
+	case "go":
+		return SourceLanguageGo, true
+	case "java":
+		return SourceLanguageJava, true
+	case "javascript":
+		return SourceLanguageJavaScript, true
+	case "kotlin":
+		return SourceLanguageKotlin, true
+	case "php":
+		return SourceLanguagePHP, true
+	case "python":
+		return SourceLanguagePython, true
+	case "ruby":
+		return SourceLanguageRuby, true
+	case "rust":
+		return SourceLanguageRust, true
+	case "tsx":
+		return SourceLanguageTSX, true
+	case "typescript":
+		return SourceLanguageTypeScript, true
+	default:
+		return SourceLanguageUnknown, false
+	}
+}
+
+type NodeKind string
+
+const maxAttachedRegions = 24
+
 type Region struct {
-	Category    string `json:"category"`
-	Kind        string `json:"kind"`
+	Category    CodeKind `json:"category"`
+	Kind        NodeKind `json:"kind"`
 	Source      string `json:"source"`
 	StartLine   uint   `json:"startLine"`
 	EndLine     uint   `json:"endLine"`
@@ -61,11 +224,12 @@ type TypeDeclaration struct {
 
 type languageSpec struct {
 	name             string
+	id               SourceLanguage
 	language         *tree_sitter.Language
 	functionQuery    string
 	typeQuery        string
 	typeContextQuery string
-	regionKinds      map[string]string
+	regionKinds      map[string]CodeKind
 }
 
 type Extractor struct {
@@ -99,7 +263,27 @@ func (extractor *Extractor) Extract(path string, source []byte) ([]CodeUnit, err
 	defer tree.Close()
 
 	root := tree.RootNode()
-	functions, types, err := extractPrimaryUnits(spec, path, source, root)
+	functions, err := extractMatches(
+		spec,
+		path,
+		source,
+		root,
+		spec.functionQuery,
+		"function",
+		CodeKindFunction,
+	)
+	if err != nil {
+		return nil, err
+	}
+	types, err := extractMatches(
+		spec,
+		path,
+		source,
+		root,
+		spec.typeQuery,
+		"type",
+		CodeKindType,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -138,39 +322,6 @@ func parseSource(
 	return tree, nil
 }
 
-func extractPrimaryUnits(
-	spec languageSpec,
-	path string,
-	source []byte,
-	root *tree_sitter.Node,
-) ([]CodeUnit, []CodeUnit, error) {
-	functions, err := extractMatches(
-		spec,
-		path,
-		source,
-		root,
-		spec.functionQuery,
-		"function",
-		CodeKindFunction,
-	)
-	if err != nil {
-		return nil, nil, err
-	}
-	types, err := extractMatches(
-		spec,
-		path,
-		source,
-		root,
-		spec.typeQuery,
-		"type",
-		CodeKindType,
-	)
-	if err != nil {
-		return nil, nil, err
-	}
-	return functions, types, nil
-}
-
 func extractTypeDeclarations(
 	spec languageSpec,
 	path string,
@@ -178,7 +329,17 @@ func extractTypeDeclarations(
 	root *tree_sitter.Node,
 	types []CodeUnit,
 ) ([]TypeDeclaration, error) {
-	declarations := typeDeclarations(types)
+	declarations := make([]TypeDeclaration, 0, len(types))
+	for _, unit := range types {
+		declarations = append(declarations, TypeDeclaration{
+			Name:      unit.Name,
+			Source:    unit.Source,
+			StartLine: unit.StartLine,
+			EndLine:   unit.EndLine,
+			StartByte: unit.StartByte,
+			EndByte:   unit.EndByte,
+		})
+	}
 	if spec.typeContextQuery != "" {
 		contextTypes, err := extractMatches(
 			spec,
@@ -192,24 +353,18 @@ func extractTypeDeclarations(
 		if err != nil {
 			return nil, err
 		}
-		declarations = append(declarations, typeDeclarations(contextTypes)...)
+		for _, unit := range contextTypes {
+			declarations = append(declarations, TypeDeclaration{
+				Name:      unit.Name,
+				Source:    unit.Source,
+				StartLine: unit.StartLine,
+				EndLine:   unit.EndLine,
+				StartByte: unit.StartByte,
+				EndByte:   unit.EndByte,
+			})
+		}
 	}
 	return declarations, nil
-}
-
-func typeDeclarations(units []CodeUnit) []TypeDeclaration {
-	declarations := make([]TypeDeclaration, 0, len(units))
-	for _, unit := range units {
-		declarations = append(declarations, TypeDeclaration{
-			Name:      unit.Name,
-			Source:    unit.Source,
-			StartLine: unit.StartLine,
-			EndLine:   unit.EndLine,
-			StartByte: unit.StartByte,
-			EndByte:   unit.EndByte,
-		})
-	}
-	return declarations
 }
 
 func attachRelatedTypes(functions []CodeUnit, declarations []TypeDeclaration) {
@@ -234,7 +389,7 @@ func attachRegions(units []CodeUnit, regions []Region) {
 				continue
 			}
 			units[index].Regions = append(units[index].Regions, region)
-			if len(units[index].Regions) == 24 {
+			if len(units[index].Regions) == maxAttachedRegions {
 				break
 			}
 		}
@@ -269,53 +424,101 @@ func extractMatches(
 	defer cursor.Close()
 
 	matches := cursor.Matches(query, root, source)
+	unitIndex, nameIndex, haveCaptures := captureIndexes(query, captureName)
 	units := make([]CodeUnit, 0)
 	for {
 		match := matches.Next()
 		if match == nil {
 			break
 		}
-
-		var unitNode, nameNode *tree_sitter.Node
-		for index := range match.Captures {
-			capture := &match.Captures[index]
-			switch query.CaptureNames()[capture.Index] {
-			case captureName:
-				node := capture.Node
-				unitNode = &node
-			case "name":
-				node := capture.Node
-				nameNode = &node
-			}
-		}
-		if unitNode == nil || nameNode == nil {
+		if !haveCaptures {
 			continue
 		}
 
-		sourceNode := documentationAnchor(unitNode)
-		sourceStartByte, sourceStartPosition := leadingCommentStart(sourceNode, source)
-		end := unitNode.EndPosition()
-		units = append(units, CodeUnit{
-			Kind:        kind,
-			Name:        nameNode.Utf8Text(source),
-			Language:    spec.name,
-			Path:        path,
-			Source:      string(source[sourceStartByte:unitNode.EndByte()]),
-			StartLine:   sourceStartPosition.Row + 1,
-			EndLine:     end.Row + 1,
-			StartColumn: sourceStartPosition.Column,
-			EndColumn:   end.Column,
-			StartByte:   sourceStartByte,
-			EndByte:     unitNode.EndByte(),
-		})
+		unitNode, nameNode := capturePair(match, unitIndex, nameIndex)
+		if unitNode == nil || nameNode == nil {
+			continue
+		}
+		units = append(units, codeUnitFromNodes(
+			spec,
+			path,
+			source,
+			kind,
+			unitNode,
+			nameNode,
+		))
 	}
 	return units, nil
+}
+
+const identifierCapture = "name"
+
+func captureIndexes(query *tree_sitter.Query, unitCapture string) (uint32, uint32, bool) {
+	var unitIndex, nameIndex uint32
+	var haveUnit, haveName bool
+	for index, name := range query.CaptureNames() {
+		if name == unitCapture {
+			unitIndex = uint32(index)
+			haveUnit = true
+			continue
+		}
+		if name == identifierCapture {
+			nameIndex = uint32(index)
+			haveName = true
+		}
+	}
+	return unitIndex, nameIndex, haveUnit && haveName
+}
+
+func capturePair(
+	match *tree_sitter.QueryMatch,
+	unitIndex uint32,
+	nameIndex uint32,
+) (*tree_sitter.Node, *tree_sitter.Node) {
+	var unitNode, nameNode *tree_sitter.Node
+	for index := range match.Captures {
+		capture := &match.Captures[index]
+		node := capture.Node
+		switch capture.Index {
+		case unitIndex:
+			unitNode = &node
+		case nameIndex:
+			nameNode = &node
+		}
+	}
+	return unitNode, nameNode
+}
+
+func codeUnitFromNodes(
+	spec languageSpec,
+	path string,
+	source []byte,
+	kind CodeKind,
+	unitNode *tree_sitter.Node,
+	nameNode *tree_sitter.Node,
+) CodeUnit {
+	sourceNode := documentationAnchor(unitNode)
+	sourceStartByte, sourceStartPosition := leadingCommentStart(sourceNode, source, spec.regionKinds)
+	end := unitNode.EndPosition()
+	return CodeUnit{
+		Kind:        kind,
+		Name:        nameNode.Utf8Text(source),
+		Language:    spec.id,
+		Path:        path,
+		Source:      string(source[sourceStartByte:unitNode.EndByte()]),
+		StartLine:   sourceStartPosition.Row + 1,
+		EndLine:     end.Row + 1,
+		StartColumn: sourceStartPosition.Column,
+		EndColumn:   end.Column,
+		StartByte:   sourceStartByte,
+		EndByte:     unitNode.EndByte(),
+	}
 }
 
 func extractRegions(
 	root *tree_sitter.Node,
 	source []byte,
-	kinds map[string]string,
+	kinds map[string]CodeKind,
 ) []Region {
 	regions := make([]Region, 0)
 	var walk func(*tree_sitter.Node)
@@ -325,7 +528,7 @@ func extractRegions(
 			end := node.EndPosition()
 			regions = append(regions, Region{
 				Category:    category,
-				Kind:        node.Kind(),
+				Kind:        NodeKind(node.Kind()),
 				Source:      node.Utf8Text(source),
 				StartLine:   start.Row + 1,
 				EndLine:     end.Row + 1,
@@ -363,12 +566,13 @@ func documentationAnchor(node *tree_sitter.Node) *tree_sitter.Node {
 func leadingCommentStart(
 	node *tree_sitter.Node,
 	source []byte,
+	regionKinds map[string]CodeKind,
 ) (uint, tree_sitter.Point) {
 	startByte := node.StartByte()
 	startPosition := node.StartPosition()
 
 	for previous := node.PrevNamedSibling(); previous != nil; previous = previous.PrevNamedSibling() {
-		if !isCommentNode(previous.Kind()) ||
+		if regionKinds[previous.Kind()] != CodeKindComment ||
 			!isAdjacentCommentGap(source[previous.EndByte():startByte]) {
 			break
 		}
@@ -376,10 +580,6 @@ func leadingCommentStart(
 		startPosition = previous.StartPosition()
 	}
 	return startByte, startPosition
-}
-
-func isCommentNode(kind string) bool {
-	return kind == "comment" || strings.HasSuffix(kind, "comment")
 }
 
 func isAdjacentCommentGap(gap []byte) bool {

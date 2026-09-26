@@ -197,7 +197,7 @@ func TestExtractCodeUnits(t *testing.T) {
 			}
 			keys := make([]string, 0, len(units))
 			for _, unit := range units {
-				keys = append(keys, string(unit.Kind)+":"+unit.Name)
+				keys = append(keys, unit.Kind.String()+":"+unit.Name)
 				if unit.StartLine == 0 || unit.EndLine < unit.StartLine {
 					t.Fatalf("invalid line range in %#v", unit)
 				}
@@ -533,13 +533,13 @@ func TestExtractIncludesBoundedLocalizationRegions(t *testing.T) {
 		t.Fatalf("regions = %#v, want comment and two fields", unit.Regions)
 	}
 	if unit.Regions[0].Kind != "comment" ||
-		unit.Regions[0].Category != "comment" ||
+		unit.Regions[0].Category != CodeKindComment ||
 		unit.Regions[0].StartLine != 3 ||
 		unit.Regions[0].StartColumn != 0 {
 		t.Fatalf("comment region = %#v", unit.Regions[0])
 	}
 	if unit.Regions[1].Kind != "field_declaration" ||
-		unit.Regions[1].Category != "field" ||
+		unit.Regions[1].Category != CodeKindField ||
 		unit.Regions[1].Source != "Enabled bool" ||
 		unit.Regions[1].StartLine != 5 ||
 		unit.Regions[1].StartColumn != 1 {
@@ -636,18 +636,18 @@ func TestNewLanguagePresetsCategorizeRegions(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Extract() error = %v", err)
 			}
-			categories := make(map[string]bool)
+			categories := make(map[CodeKind]bool)
 			for _, unit := range units {
 				for _, region := range unit.Regions {
 					categories[region.Category] = true
 				}
 			}
-			for _, category := range []string{"comment", "field", "statement"} {
+			for _, category := range []CodeKind{CodeKindComment, CodeKindField, CodeKindStatement} {
 				if !categories[category] {
 					t.Errorf(
 						"Extract() region categories = %v, missing %q",
 						categories,
-						category,
+						category.String(),
 					)
 				}
 			}

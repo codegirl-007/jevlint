@@ -39,17 +39,121 @@ type Rule struct {
 	Include     []string `json:"include,omitempty"`
 	Exclude     []string `json:"exclude,omitempty"`
 	Exceptions  []string `json:"exceptions,omitempty"`
-	Kinds       []string `json:"kinds,omitempty"`
-	Localize    []string `json:"localize,omitempty"`
+	Kinds       []TargetKind `json:"kinds,omitempty"`
+	Localize    []TargetKind `json:"localize,omitempty"`
 }
 
-type Severity string
+type TargetKind int
 
 const (
-	SeverityInfo    Severity = "info"
-	SeverityWarning Severity = "warning"
-	SeverityError   Severity = "error"
+	TargetKindUnknown TargetKind = iota
+	TargetKindComment
+	TargetKindField
+	TargetKindFunction
+	TargetKindStatement
+	TargetKindType
 )
+
+func (kind TargetKind) String() string {
+	switch kind {
+	case TargetKindComment:
+		return KindComment
+	case TargetKindField:
+		return KindField
+	case TargetKindFunction:
+		return KindFunction
+	case TargetKindStatement:
+		return KindStatement
+	case TargetKindType:
+		return KindType
+	default:
+		return "unknown"
+	}
+}
+
+func (kind TargetKind) MarshalJSON() ([]byte, error) {
+	if kind == TargetKindUnknown {
+		return nil, fmt.Errorf("invalid kind %d", kind)
+	}
+	return json.Marshal(kind.String())
+}
+
+func (kind *TargetKind) UnmarshalJSON(data []byte) error {
+	var value string
+	if err := json.Unmarshal(data, &value); err != nil {
+		return err
+	}
+	parsed, ok := ParseTargetKind(value)
+	if !ok {
+		return fmt.Errorf("invalid kind %q", value)
+	}
+	*kind = parsed
+	return nil
+}
+
+func ParseTargetKind(value string) (TargetKind, bool) {
+	switch value {
+	case KindComment:
+		return TargetKindComment, true
+	case KindField:
+		return TargetKindField, true
+	case KindFunction:
+		return TargetKindFunction, true
+	case KindStatement:
+		return TargetKindStatement, true
+	case KindType:
+		return TargetKindType, true
+	default:
+		return TargetKindUnknown, false
+	}
+}
+
+type Severity int
+
+const (
+	SeverityUnknown Severity = iota
+	SeverityInfo
+	SeverityWarning
+	SeverityError
+)
+
+func (severity Severity) String() string {
+	switch severity {
+	case SeverityInfo:
+		return "info"
+	case SeverityWarning:
+		return "warning"
+	case SeverityError:
+		return "error"
+	default:
+		return "unknown"
+	}
+}
+
+func (severity Severity) MarshalJSON() ([]byte, error) {
+	if severity == SeverityUnknown {
+		return nil, fmt.Errorf("invalid severity %d", severity)
+	}
+	return json.Marshal(severity.String())
+}
+
+func (severity *Severity) UnmarshalJSON(data []byte) error {
+	var value string
+	if err := json.Unmarshal(data, &value); err != nil {
+		return err
+	}
+	switch value {
+	case "info":
+		*severity = SeverityInfo
+	case "warning":
+		*severity = SeverityWarning
+	case "error":
+		*severity = SeverityError
+	default:
+		*severity = SeverityUnknown
+	}
+	return nil
+}
 
 var languagePresets = map[string]struct{}{
 	"c":          {},
@@ -266,7 +370,7 @@ func validateRegionOverrides(id string, regions map[string][]string) error {
 	}
 	for category, kinds := range regions {
 		switch category {
-		case "comment", "field", "statement":
+		case KindComment, KindField, KindStatement:
 		default:
 			return fmt.Errorf(
 				"languages.%s.regions contains invalid category %q",
@@ -327,10 +431,18 @@ func validateRulePatterns(rule Rule, prefix string) error {
 	return nil
 }
 
+const (
+	KindComment   = "comment"
+	KindField     = "field"
+	KindFunction  = "function"
+	KindStatement = "statement"
+	KindType      = "type"
+)
+
 func validateRuleLocalization(rule Rule, prefix string) error {
 	for _, category := range rule.Localize {
 		switch category {
-		case "comment", "field", "statement":
+		case TargetKindComment, TargetKindField, TargetKindStatement:
 		default:
 			return fmt.Errorf(
 				"%s.localize contains invalid category %q; want comment, field, or statement",
@@ -344,9 +456,7 @@ func validateRuleLocalization(rule Rule, prefix string) error {
 
 func validateRuleKinds(rule Rule, prefix string) error {
 	for _, kind := range rule.Kinds {
-		switch kind {
-		case "comment", "field", "function", "statement", "type":
-		default:
+		if kind == TargetKindUnknown {
 			return fmt.Errorf(
 				"%s.kinds contains invalid kind %q; "+
 					"want comment, field, function, statement, or type",

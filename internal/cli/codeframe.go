@@ -9,61 +9,83 @@ import (
 
 	"github.com/alecthomas/chroma/v2/quick"
 
+	"jevlint/internal/parsing"
 	"jevlint/internal/runner"
 )
 
-const tabWidth = 4
+const frameTabWidth = 4
 
 func writeCodeFrame(writer io.Writer, style outputStyle, finding runner.Finding) {
-	rawLines := strings.Split(finding.Snippet, "\n")
-	expandedLines := make([]string, len(rawLines))
-	for index, line := range rawLines {
-		expandedLines[index] = expandTabs(line, tabWidth)
-	}
-	displayLines := highlightedLines(
-		strings.Join(expandedLines, "\n"),
-		finding.Language,
-		style.color,
-	)
-	if len(displayLines) != len(rawLines) {
-		displayLines = expandedLines
-	}
-
 	lineNumberWidth := len(strconv.FormatUint(uint64(finding.EndLine), 10))
-	for index, line := range displayLines {
+	for index, raw := range strings.Split(finding.Snippet, "\n") {
+		expanded := expandTabs(raw, frameTabWidth)
+		display := expanded
+		if highlighted := highlightedLines(expanded, finding.Language, style.color); len(highlighted) == 1 {
+			display = highlighted[0]
+		}
 		lineNumber := finding.StartLine + uint(index)
-		fmt.Fprintf(
-			writer,
-			"  %*d %s %s\n",
-			lineNumberWidth,
-			lineNumber,
-			style.paint("36", "│"),
-			line,
-		)
+		writeCodeFrameLine(writer, style, lineNumberWidth, lineNumber, display)
 		for _, location := range finding.Locations {
-			start, length, ok := pointerForLine(
-				rawLines[index],
-				lineNumber,
-				displayLocation(finding, location),
-				tabWidth,
-			)
-			if !ok {
-				continue
-			}
-			fmt.Fprintf(
+			writeCodeFramePointer(
 				writer,
-				"  %*s %s %s%s\n",
+				style,
+				finding,
+				raw,
+				lineNumber,
 				lineNumberWidth,
-				"",
-				style.paint("36", "│"),
-				strings.Repeat(" ", start),
-				style.severity(
-					finding.Severity,
-					strings.Repeat("^", length),
-				),
+				location,
 			)
 		}
 	}
+}
+
+func writeCodeFrameLine(
+	writer io.Writer,
+	style outputStyle,
+	lineNumberWidth int,
+	lineNumber uint,
+	line string,
+) {
+	fmt.Fprintf(
+		writer,
+		"  %*d %s %s\n",
+		lineNumberWidth,
+		lineNumber,
+		style.paint("36", "│"),
+		line,
+	)
+}
+
+func writeCodeFramePointer(
+	writer io.Writer,
+	style outputStyle,
+	finding runner.Finding,
+	rawLine string,
+	lineNumber uint,
+	lineNumberWidth int,
+	location runner.Location,
+) {
+	start, length, ok := pointerForLine(
+		rawLine,
+		lineNumber,
+		displayLocation(finding, location),
+		frameTabWidth,
+	)
+	if !ok {
+		return
+	}
+	fmt.Fprintf(
+		writer,
+		"  %*s %s %s%s\n",
+		lineNumberWidth,
+		"",
+		style.paint("36", "│"),
+		strings.Repeat(" ", start),
+		style.severity(
+			finding.Severity,
+			strings.Repeat("^", length),
+		),
+	)
 }
 
 func displayLocation(
@@ -88,24 +110,11 @@ func highlightedLines(source string, language string, color bool) []string {
 		return strings.Split(source, "\n")
 	}
 
-	lexer := map[string]string{
-		"c":          "c",
-		"cpp":        "cpp",
-		"csharp":     "csharp",
-		"java":       "java",
-		"javascript": "javascript",
-		"kotlin":     "kotlin",
-		"php":        "php",
-		"ruby":       "ruby",
-		"typescript": "typescript",
-		"tsx":        "tsx",
-		"python":     "python",
-		"go":         "go",
-		"rust":       "rust",
-	}[language]
-	if lexer == "" {
+	sourceLanguage, ok := parsing.ParseSourceLanguage(language)
+	if !ok {
 		return strings.Split(source, "\n")
 	}
+	lexer := sourceLanguage.String()
 
 	var highlighted bytes.Buffer
 	if err := quick.Highlight(

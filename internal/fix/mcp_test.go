@@ -140,12 +140,12 @@ func TestServeCheckListsAndRunsTool(t *testing.T) {
 	))
 
 	var output bytes.Buffer
-	if err := ServeCheck(context.Background(), &input, &output); err != nil {
-		t.Fatalf("ServeCheck() error = %v", err)
+	if err := ServeMCP(context.Background(), &input, &output, os.Getenv); err != nil {
+		t.Fatalf("ServeMCP() error = %v", err)
 	}
 	messages := readAllMCPMessages(t, output.Bytes())
 	if len(messages) != 3 {
-		t.Fatalf("ServeCheck() messages = %d, want 3: %s", len(messages), output.String())
+		t.Fatalf("ServeMCP() messages = %d, want 3: %s", len(messages), output.String())
 	}
 	if !strings.Contains(string(messages[1]), checkToolName) {
 		t.Fatalf("tools/list = %s", messages[1])
@@ -165,21 +165,91 @@ func TestServeCheckUsesNewlineDelimitedJSON(t *testing.T) {
 	input.WriteString(`{"jsonrpc":"2.0","id":2,"method":"ping","params":{}}` + "\n")
 
 	var output bytes.Buffer
-	if err := ServeCheck(context.Background(), &input, &output); err != nil {
-		t.Fatalf("ServeCheck() error = %v", err)
+	if err := ServeMCP(context.Background(), &input, &output, os.Getenv); err != nil {
+		t.Fatalf("ServeMCP() error = %v", err)
 	}
 	if strings.Contains(output.String(), "Content-Length") {
-		t.Fatalf("ServeCheck() used LSP framing:\n%s", output.String())
+		t.Fatalf("ServeMCP() used LSP framing:\n%s", output.String())
 	}
 	messages := readAllMCPMessages(t, output.Bytes())
 	if len(messages) != 2 {
-		t.Fatalf("ServeCheck() messages = %d, want 2: %s", len(messages), output.String())
+		t.Fatalf("ServeMCP() messages = %d, want 2: %s", len(messages), output.String())
 	}
 	if !strings.Contains(string(messages[0]), `"protocolVersion":"2025-03-26"`) {
 		t.Fatalf("initialize = %s", messages[0])
 	}
 	if bytes.Contains(messages[0], []byte{'\n'}) {
 		t.Fatalf("initialize response contained an embedded newline: %q", messages[0])
+	}
+}
+
+func TestRunWorkspaceCheckScansEntireProject(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	if err := os.WriteFile(
+		filepath.Join(root, "jevlint.json"),
+		[]byte(`{
+			"languages": {"go": {}},
+			"rules": [{
+				"id": "database-joins",
+				"description": "Join related records in the database.",
+				"severity": "error",
+				"include": ["**/*.go"]
+			}]
+		}`),
+		0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(root, "one.go"),
+		[]byte("package sample\n\nfunc One() {}\n"),
+		0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(root, "two.go"),
+		[]byte("package sample\n\nfunc Two() {}\n"),
+		0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(
+		func(writer http.ResponseWriter, _ *http.Request) {
+			writer.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(writer, `{
+				"model": "jev-test",
+				"answers": {
+					"database-joins": {
+						"type": "choice",
+						"choice": "pass",
+						"confidence": 1
+					}
+				}
+			}`)
+		},
+	))
+	defer server.Close()
+	t.Setenv("TYPESAFE_API_KEY", "sk-test")
+	t.Setenv("TYPESAFE_BASE_URL", server.URL)
+	t.Setenv("TYPESAFE_DEFAULT_MODEL", "jev-test")
+	t.Setenv("JEVLINT_MCP_ROOT", root)
+	t.Setenv("JEVLINT_MCP_CONFIG", filepath.Join(root, "jevlint.json"))
+	t.Setenv("JEVLINT_MCP_CACHE_ROOT", root)
+
+	payload, err := runWorkspaceCheck(context.Background(), os.Getenv)
+	if err != nil {
+		t.Fatalf("runWorkspaceCheck() error = %v", err)
+	}
+	var result struct {
+		ScannedFiles int `json:"scannedFiles"`
+	}
+	if err := json.Unmarshal([]byte(payload), &result); err != nil {
+		t.Fatalf("decode check payload: %v\n%s", err, payload)
+	}
+	if result.ScannedFiles != 2 {
+		t.Fatalf("scannedFiles = %d, want 2 (full project, not --changed)", result.ScannedFiles)
 	}
 }
 
@@ -233,11 +303,11 @@ func TestServeCheckUsesCacheOnRepeat(t *testing.T) {
 	t.Setenv("JEVLINT_MCP_CONFIG", filepath.Join(root, "jevlint.json"))
 	t.Setenv("JEVLINT_MCP_CACHE_ROOT", root)
 
-	if _, err := runWorkspaceCheck(context.Background()); err != nil {
+	if _, err := runWorkspaceCheck(context.Background(), os.Getenv); err != nil {
 		t.Fatalf("first check: %v", err)
 	}
 	afterFirst := calls.Load()
-	if _, err := runWorkspaceCheck(context.Background()); err != nil {
+	if _, err := runWorkspaceCheck(context.Background(), os.Getenv); err != nil {
 		t.Fatalf("second check: %v", err)
 	}
 	if calls.Load() != afterFirst {
