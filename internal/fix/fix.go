@@ -73,7 +73,7 @@ func Generate(ctx context.Context, options Options) (Proposal, error) {
 	if err != nil {
 		return Proposal{}, fmt.Errorf("create ACP workspace: %w", err)
 	}
-	removeStaleFixWorkspaces(workspace)
+	removeStaleFixWorkspaces(os.TempDir(), workspace)
 	defer removeFixWorkspace(workspace)
 
 	before, err := mirrorProject(root, workspace, options)
@@ -269,8 +269,8 @@ func removeFixWorkspace(workspace string) {
 	_ = os.RemoveAll(workspace)
 }
 
-func removeStaleFixWorkspaces(keep string) {
-	entries, err := os.ReadDir(os.TempDir())
+func removeStaleFixWorkspaces(root string, keep string) {
+	entries, err := os.ReadDir(root)
 	if err != nil {
 		return
 	}
@@ -279,7 +279,7 @@ func removeStaleFixWorkspaces(keep string) {
 		if !entry.IsDir() || !strings.HasPrefix(entry.Name(), fixWorkspacePrefix) {
 			continue
 		}
-		path := filepath.Join(os.TempDir(), entry.Name())
+		path := filepath.Join(root, entry.Name())
 		if filepath.Clean(path) == keep {
 			continue
 		}

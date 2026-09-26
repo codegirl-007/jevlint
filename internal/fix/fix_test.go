@@ -183,19 +183,17 @@ func TestBuildPromptDescribesSnapshotAndTargetedChecks(t *testing.T) {
 }
 
 func TestRemoveStaleFixWorkspacesLeavesCurrent(t *testing.T) {
-	stale, err := os.MkdirTemp("", fixWorkspacePrefix+"*")
+	root := t.TempDir()
+	stale, err := os.MkdirTemp(root, fixWorkspacePrefix+"*")
 	if err != nil {
 		t.Fatal(err)
 	}
-	keep, err := os.MkdirTemp("", fixWorkspacePrefix+"*")
+	keep, err := os.MkdirTemp(root, fixWorkspacePrefix+"*")
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() {
-		_ = os.RemoveAll(keep)
-	})
 
-	removeStaleFixWorkspaces(keep)
+	removeStaleFixWorkspaces(root, keep)
 	if _, err := os.Stat(stale); !os.IsNotExist(err) {
 		t.Fatalf("stale workspace still exists: %v", err)
 	}
