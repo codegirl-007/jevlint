@@ -744,9 +744,6 @@ func evaluateLocalizationJob(
 }
 
 func localizesTo(rule config.Rule, category parsing.CodeKind) bool {
-	if rule.Localize == nil {
-		return true
-	}
 	for _, allowed := range rule.Localize {
 		parsed, ok := parsing.ParseCodeKind(allowed.String())
 		if ok && parsed == category {

@@ -165,27 +165,24 @@ func TestCheckBatchesRulesPerFunctionAndRetainsSnippet(t *testing.T) {
 		t.Fatalf("Check() error = %v", err)
 	}
 
-	if evaluator.calls != 3 {
-		t.Fatalf("evaluator calls = %d, want 3", evaluator.calls)
+	if evaluator.calls != 2 {
+		t.Fatalf("evaluator calls = %d, want 2", evaluator.calls)
 	}
-	if len(evaluator.batches) != 3 ||
+	if len(evaluator.batches) != 2 ||
 		len(evaluator.batches[0].Rules) != 2 ||
-		len(evaluator.batches[1].Rules) != 2 ||
-		len(evaluator.batches[2].Rules) != 1 {
+		len(evaluator.batches[1].Rules) != 2 {
 		t.Fatalf("batches = %#v", evaluator.batches)
 	}
 	if evaluator.batches[0].CodeUnit.Kind != parsing.CodeKindType ||
-		evaluator.batches[1].CodeUnit.Kind != parsing.CodeKindFunction ||
-		evaluator.batches[2].CodeUnit.Kind != parsing.CodeKindRegion {
+		evaluator.batches[1].CodeUnit.Kind != parsing.CodeKindFunction {
 		t.Fatalf(
-			"batch kinds = %s, %s, %s",
+			"batch kinds = %s, %s",
 			evaluator.batches[0].CodeUnit.Kind,
 			evaluator.batches[1].CodeUnit.Kind,
-			evaluator.batches[2].CodeUnit.Kind,
 		)
 	}
-	if report.Evaluations != 5 {
-		t.Fatalf("evaluations = %d, want 5", report.Evaluations)
+	if report.Evaluations != 4 {
+		t.Fatalf("evaluations = %d, want 4", report.Evaluations)
 	}
 	if len(report.Findings) != 1 {
 		t.Fatalf("findings = %#v", report.Findings)
@@ -537,14 +534,20 @@ func TestCheckLocalizesFailedRuleToTreeSitterRegion(t *testing.T) {
 	}
 }
 
-func TestLocalizesToDistinguishesOmittedAndExplicitEmpty(t *testing.T) {
+func TestLocalizesToRequiresExplicitCategory(t *testing.T) {
 	t.Parallel()
 
-	if !localizesTo(config.Rule{}, parsing.CodeKindStatement) {
-		t.Fatal("omitted localization should allow every category")
+	if localizesTo(config.Rule{}, parsing.CodeKindStatement) {
+		t.Fatal("omitted localization should skip the second pass")
 	}
 	if localizesTo(config.Rule{Localize: []config.TargetKind{}}, parsing.CodeKindStatement) {
-		t.Fatal("explicit empty localization should disable the second pass")
+		t.Fatal("empty localization should skip the second pass")
+	}
+	if !localizesTo(
+		config.Rule{Localize: []config.TargetKind{config.TargetKindStatement}},
+		parsing.CodeKindStatement,
+	) {
+		t.Fatal("explicit statement localization should run the second pass")
 	}
 }
 

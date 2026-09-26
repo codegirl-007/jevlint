@@ -19,13 +19,11 @@ go run ./cmd/jevlint check .
 go run ./cmd/jevlint check --format json src
 go run ./cmd/jevlint check --concurrency 8 src
 go run ./cmd/jevlint check --refresh-cache .
-go run ./cmd/jevlint fix .
-go run ./cmd/jevlint check --fix .
 ```
 
 | Flag | Description |
 | --- | --- |
-| `--changed` | Check only git-modified files (staged, unstaged, and untracked). `--fix` still verifies the whole project through `jevlint_check`. |
+| `--changed` | Check only git-modified files (staged, unstaged, and untracked). |
 | `--clear-cache` | Clear this project's cached evaluations before checking. New results are cached. |
 | `--color auto\|always\|never` | Control colored text output. Defaults to `auto`. |
 | `--config path` | Use a different rule file. Its directory becomes the project root. |
@@ -33,7 +31,6 @@ go run ./cmd/jevlint check --fix .
 | `--format text\|json` | Select human-readable or machine-readable output. Defaults to `text`. |
 | `--no-cache` | Bypass cache reads and writes for this run. |
 | `--refresh-cache` | Reevaluate code and replace matching cached results. |
-| `--fix` | Print current findings, then apply a validated proposal. Bypasses the cache. |
 
 ```sh
 go build -o jevlint ./cmd/jevlint
@@ -47,10 +44,6 @@ Jevlint reads `jevlint.json` by default.
 
 ```json
 {
-  "fix": {
-    "command": ["gemini", "--acp"],
-    "exclude": ["examples/**"]
-  },
   "languages": {
     "go": {},
     "typescript": {},
@@ -95,7 +88,9 @@ customize a preset, but it cannot load an arbitrary external grammar.
 - `include` and `exclude`: doublestar file patterns
 - `kinds`: `comment`, `field`, `function`, `statement`, or `type`
 - `exceptions`: cases that should pass
-- `localize`: `comment`, `field`, or `statement`; use `[]` to disable pointers
+- `localize`: `comment`, `field`, or `statement`. Omit the key or use `[]` to
+  skip the second pass. Each matching region is another Jev request on a fail,
+  up to 24 regions per function or type.
 
 ## How it works
 
@@ -103,76 +98,13 @@ customize a preset, but it cannot load an arbitrary external grammar.
 - Comments, fields, and statements include their nearest function or type as context.
 - Code units are checked in parallel, four at a time by default.
 - Applicable rules are batched into one request per code unit.
-- Failed function and type rules can use `localize` for a focused second pass.
+- Failed function and type rules can set `localize` for a focused second pass.
+  That pass is extra Jev evaluations and is off unless the rule lists
+  categories.
 - Results include syntax-highlighted snippets and pointers when available.
 - Network failures and retryable API responses are retried up to twice.
 
 Jevlint sends extracted source code and file metadata to TypeSafe.
-
-## Autofix
-
-`jevlint fix` asks a pre-authenticated ACP agent to fix current findings in
-the project directory. `jevlint check --fix` prints the findings first, then
-does the same. The agent edits project files in place. Jevlint records a
-before-image first; if inspect or Jev validation fails, those bytes are
-written back and unexpected files are removed. Accepted edits stay on disk.
-The session attaches a `jevlint_check` MCP tool. The agent is told to call
-that tool, not the `jevlint` CLI, and not finish until the check reports no
-findings. Progress is written to stderr while the result or JSON is
-written to stdout.
-
-Configure any ACP agent command:
-
-```json
-{
-  "fix": {
-    "command": ["claude-agent-acp"]
-  }
-}
-```
-
-By default, the agent may read and edit the safe, non-ignored project tree.
-Use `fix.context` to narrow that set and `fix.exclude` for additional
-project-specific exclusions:
-
-```json
-{
-  "fix": {
-    "command": ["agent", "acp"],
-    "context": ["src/**", "tests/**", "go.mod", "go.sum"],
-    "exclude": ["src/generated/**"]
-  }
-}
-```
-
-Common choices are
-[Claude Agent ACP](https://github.com/agentclientprotocol/claude-agent-acp),
-[Codex ACP](https://github.com/agentclientprotocol/codex-acp), and Gemini CLI
-with `["gemini", "--acp"]`.
-
-Jevlint records regular project files in memory before the agent starts,
-respecting nested `.gitignore` files. It always excludes version-control
-metadata, dependency and build directories, symlinks, special files, and
-common secret files such as `.env`, private keys, and package-manager
-credentials. Finding files and `jevlint.json` remain writable when
-`fix.context` narrows the set.
-
-The session includes a `jevlint_check` MCP tool so the agent can re-run Jevlint
-on the project. It must keep fixing until that check reports no findings.
-The tool only checks; it cannot apply fixes. Mid-session checks use the project
-evaluation cache so unchanged units are not sent to Jev again. The opening
-`--fix` check and the final validation stay uncached. Terminals stay disabled.
-
-The agent can read and edit existing project files. After the session, Jevlint
-rejects created, deleted, or replaced files and restores the before-image.
-Proposed source must parse and pass Jev validation; otherwise the before-image
-is restored. Candidate evaluations are not cached. The ACP client does not
-provide terminal access, though the configured agent executable may have its
-own local tools for targeted formatting and tests.
-
-The configured agent is an external process and may send project source to its
-model provider. Autofix is not an operating-system sandbox; the command still
-runs as your user. Use only agents and providers you trust.
 
 ## Cache
 
@@ -188,7 +120,7 @@ affects reporting.
 Entries do not expire automatically. Because `jev-latest` can change without
 changing its name, use `--refresh-cache` for fresh model behavior. Use
 `--no-cache` to bypass caching or `--clear-cache` to clear this project's cache
-before a run. `--fix` also bypasses the cache.
+before a run.
 
 ## Supported languages
 
@@ -216,13 +148,11 @@ before a run. `--fix` also bypasses the cache.
 - Type context is limited to the same file.
 - Database provenance and cross-function data flow are not traced.
 - Jev returns a constrained choice, not a free-form explanation.
-- Autofix cannot create, delete, or rename files.
-- `fix` and `--fix` keep only validated edits to existing project files.
 
 ## Exit codes
 
-- `0`: no findings, or a validated fix was applied
-- `1`: findings remain, or a proposed fix was rejected
+- `0`: no findings
+- `1`: findings remain
 - `2`: configuration or runtime error
 
 ## Verify

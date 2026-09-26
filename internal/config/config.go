@@ -8,20 +8,11 @@ import (
 	"os"
 	"sort"
 	"strings"
-
-	"github.com/bmatcuk/doublestar/v4"
 )
 
 type Config struct {
 	Languages map[string]Language `json:"languages"`
 	Rules     []Rule              `json:"rules"`
-	Fix       *Fix                `json:"fix,omitempty"`
-}
-
-type Fix struct {
-	Command []string `json:"command"`
-	Context []string `json:"context,omitempty"`
-	Exclude []string `json:"exclude,omitempty"`
 }
 
 type Language struct {
@@ -33,12 +24,12 @@ type Language struct {
 }
 
 type Rule struct {
-	ID          string   `json:"id"`
-	Description string   `json:"description"`
-	Severity    Severity `json:"severity"`
-	Include     []string `json:"include,omitempty"`
-	Exclude     []string `json:"exclude,omitempty"`
-	Exceptions  []string `json:"exceptions,omitempty"`
+	ID          string       `json:"id"`
+	Description string       `json:"description"`
+	Severity    Severity     `json:"severity"`
+	Include     []string     `json:"include,omitempty"`
+	Exclude     []string     `json:"exclude,omitempty"`
+	Exceptions  []string     `json:"exceptions,omitempty"`
 	Kinds       []TargetKind `json:"kinds,omitempty"`
 	Localize    []TargetKind `json:"localize,omitempty"`
 }
@@ -208,9 +199,6 @@ func (cfg Config) Validate() error {
 	if err := validateLanguages(cfg.Languages); err != nil {
 		return err
 	}
-	if err := validateFix(cfg.Fix); err != nil {
-		return err
-	}
 	if len(cfg.Rules) == 0 {
 		return errors.New("config must contain at least one rule")
 	}
@@ -240,38 +228,6 @@ func (cfg Config) Validate() error {
 		}
 		if err := validateRuleKinds(rule, prefix); err != nil {
 			return err
-		}
-	}
-	return nil
-}
-
-func validateFix(fix *Fix) error {
-	if fix == nil {
-		return nil
-	}
-	if len(fix.Command) == 0 {
-		return errors.New("fix.command must contain an ACP agent executable")
-	}
-	for _, argument := range fix.Command {
-		if strings.TrimSpace(argument) == "" {
-			return errors.New("fix.command contains an empty argument")
-		}
-	}
-	for name, patterns := range map[string][]string{
-		"context": fix.Context,
-		"exclude": fix.Exclude,
-	} {
-		for _, pattern := range patterns {
-			if strings.TrimSpace(pattern) == "" {
-				return fmt.Errorf("fix.%s contains an empty pattern", name)
-			}
-			if !doublestar.ValidatePattern(pattern) {
-				return fmt.Errorf(
-					"fix.%s contains invalid pattern %q",
-					name,
-					pattern,
-				)
-			}
 		}
 	}
 	return nil
