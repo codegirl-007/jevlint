@@ -42,13 +42,34 @@ func checkMCPServer(workspace string, configPath string, cacheRoot string) (acp.
 			Name:    "jevlint",
 			Command: executable,
 			Args:    []string{"mcp-check"},
-			Env: []acp.EnvVariable{
-				{Name: "JEVLINT_MCP_ROOT", Value: workspace},
-				{Name: "JEVLINT_MCP_CONFIG", Value: configPath},
-				{Name: "JEVLINT_MCP_CACHE_ROOT", Value: cacheRoot},
-			},
+			Env:     checkMCPEnv(workspace, configPath, cacheRoot),
 		},
 	}, nil
+}
+
+func checkMCPEnv(workspace string, configPath string, cacheRoot string) []acp.EnvVariable {
+	env := []acp.EnvVariable{
+		{Name: "JEVLINT_MCP_ROOT", Value: workspace},
+		{Name: "JEVLINT_MCP_CONFIG", Value: configPath},
+		{Name: "JEVLINT_MCP_CACHE_ROOT", Value: cacheRoot},
+	}
+	for _, name := range []string{
+		"TYPESAFE_API_KEY",
+		"TYPESAFE_BASE_URL",
+		"TYPESAFE_DEFAULT_MODEL",
+		"XDG_CACHE_HOME",
+		"HOME",
+		"SSL_CERT_FILE",
+		"SSL_CERT_DIR",
+		"HTTPS_PROXY",
+		"HTTP_PROXY",
+		"NO_PROXY",
+	} {
+		if value := os.Getenv(name); value != "" {
+			env = append(env, acp.EnvVariable{Name: name, Value: value})
+		}
+	}
+	return env
 }
 
 func ServeCheck(ctx context.Context, stdin io.Reader, stdout io.Writer) error {

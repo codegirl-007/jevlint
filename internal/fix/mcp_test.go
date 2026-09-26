@@ -50,6 +50,39 @@ func TestCheckMCPServerUsesHiddenCommand(t *testing.T) {
 	}
 }
 
+func TestCheckMCPServerForwardsTypeSafeEnv(t *testing.T) {
+	t.Setenv("TYPESAFE_API_KEY", "sk-test")
+	t.Setenv("TYPESAFE_BASE_URL", "https://jev.example")
+	t.Setenv("TYPESAFE_DEFAULT_MODEL", "jev-test")
+	t.Setenv("XDG_CACHE_HOME", "/tmp/jevlint-cache")
+
+	server, err := checkMCPServer(
+		"/tmp/workspace",
+		"/tmp/workspace/jevlint.json",
+		"/tmp/project",
+	)
+	if err != nil {
+		t.Fatalf("checkMCPServer() error = %v", err)
+	}
+	got := map[string]string{}
+	for _, env := range server.Stdio.Env {
+		got[env.Name] = env.Value
+	}
+	for name, want := range map[string]string{
+		"JEVLINT_MCP_ROOT":       "/tmp/workspace",
+		"JEVLINT_MCP_CONFIG":     "/tmp/workspace/jevlint.json",
+		"JEVLINT_MCP_CACHE_ROOT": "/tmp/project",
+		"TYPESAFE_API_KEY":       "sk-test",
+		"TYPESAFE_BASE_URL":      "https://jev.example",
+		"TYPESAFE_DEFAULT_MODEL": "jev-test",
+		"XDG_CACHE_HOME":         "/tmp/jevlint-cache",
+	} {
+		if got[name] != want {
+			t.Fatalf("%s = %q, want %q (env = %#v)", name, got[name], want, server.Stdio.Env)
+		}
+	}
+}
+
 func TestServeCheckListsAndRunsTool(t *testing.T) {
 	root := t.TempDir()
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
