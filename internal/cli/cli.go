@@ -28,7 +28,6 @@ Flags:
   --config path         rule configuration (default "jevlint.json")
   --concurrency number  maximum concurrent Jev requests (default 4)
   --format text|json    output format (default "text")
-  --no-cache            bypass evaluation cache reads and writes
   --refresh-cache       reevaluate and replace current cached results
 `
 
@@ -147,21 +146,13 @@ type cacheMode int
 
 const (
 	cacheReadWrite cacheMode = iota
-	cacheBypass
 	cacheRefresh
 	cacheClear
-	cacheClearAndBypass
 	cacheClearAndRefresh
 )
 
-func (mode cacheMode) shouldBypass() bool {
-	return mode == cacheBypass || mode == cacheClearAndBypass
-}
-
 func (mode cacheMode) shouldClear() bool {
-	return mode == cacheClear ||
-		mode == cacheClearAndBypass ||
-		mode == cacheClearAndRefresh
+	return mode == cacheClear || mode == cacheClearAndRefresh
 }
 
 func (mode cacheMode) shouldRefresh() bool {
@@ -237,7 +228,6 @@ func parseRunOptions(
 	configPath := flags.String("config", defaultConfigFile, "rule configuration")
 	concurrency := flags.Int("concurrency", defaultCheckConcurrency, "maximum concurrent Jev requests")
 	format := flags.String("format", "text", "output format")
-	noCache := flags.Bool("no-cache", false, "bypass evaluation cache")
 	refreshCache := flags.Bool("refresh-cache", false, "refresh cached evaluations")
 	flagArgs, paths, err := splitFlagsAndPaths(flags, args)
 	if err != nil {
@@ -250,7 +240,7 @@ func parseRunOptions(
 		}
 		return runOptions{}, exitUsageError, false
 	}
-	parsedFormat, parsedColor, exitCode, valid := validateRunOptions(
+	parsedFormat, parsedColor, exitCode, valid := parseOutputOptions(
 		*format,
 		*color,
 		*concurrency,
@@ -259,20 +249,12 @@ func parseRunOptions(
 	if !valid {
 		return runOptions{}, exitCode, false
 	}
-	bypass := *noCache
 	var mode cacheMode
 	switch {
-	case bypass && *refreshCache:
-		fmt.Fprintln(stderr, "jevlint: --no-cache and --refresh-cache cannot be combined")
-		return runOptions{}, exitUsageError, false
-	case *clearCache && bypass:
-		mode = cacheClearAndBypass
 	case *clearCache && *refreshCache:
 		mode = cacheClearAndRefresh
 	case *clearCache:
 		mode = cacheClear
-	case bypass:
-		mode = cacheBypass
 	case *refreshCache:
 		mode = cacheRefresh
 	default:
@@ -298,7 +280,7 @@ const (
 	defaultCheckConcurrency = 4
 )
 
-func validateRunOptions(
+func parseOutputOptions(
 	format string,
 	color string,
 	concurrency int,
@@ -440,9 +422,6 @@ func openResultCache(
 	stderr io.Writer,
 	userCacheDir func() (string, error),
 ) (evaluation.ResultCache, int) {
-	if mode.shouldBypass() && !mode.shouldClear() {
-		return nil, 0
-	}
 	cache, cacheErr := evaluation.NewFileCache(projectRoot, userCacheDir)
 	if cacheErr != nil {
 		return handleCacheOpenError(cacheErr, mode.shouldClear(), stderr)
@@ -452,9 +431,6 @@ func openResultCache(
 			fmt.Fprintf(stderr, "jevlint: %v\n", err)
 			return nil, exitUsageError
 		}
-	}
-	if mode.shouldBypass() {
-		return nil, exitSuccess
 	}
 	return cache, exitSuccess
 }

@@ -415,27 +415,6 @@ func TestRunRejectsInvalidConcurrency(t *testing.T) {
 	}
 }
 
-func TestRunRejectsConflictingCacheFlags(t *testing.T) {
-	t.Parallel()
-
-	var stdout, stderr bytes.Buffer
-	exitCode := runCLI(
-		context.Background(),
-		[]string{"check", "--no-cache", "--refresh-cache"},
-		&stdout,
-		&stderr,
-	)
-	if exitCode != 2 {
-		t.Fatalf("Run() exit code = %d, want 2", exitCode)
-	}
-	if !strings.Contains(
-		stderr.String(),
-		"--no-cache and --refresh-cache cannot be combined",
-	) {
-		t.Fatalf("stderr = %q", stderr.String())
-	}
-}
-
 func TestRunClearsProjectCacheBeforeAPIValidation(t *testing.T) {
 	root := writeProject(t, "package sample\n")
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
@@ -458,7 +437,6 @@ func TestRunClearsProjectCacheBeforeAPIValidation(t *testing.T) {
 			"check",
 			"--config", filepath.Join(root, "jevlint.json"),
 			"--clear-cache",
-			"--no-cache",
 			".",
 		},
 		&stdout,
