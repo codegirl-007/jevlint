@@ -20,8 +20,9 @@ import (
 
 const usage = `Usage:
   jevlint check [flags] [paths...]
+  jevlint eval [flags]
 
-Flags:
+Check flags:
   --changed             check only git-modified files
   --clear-cache         clear this project's cached evaluations before checking
   --color mode          color output: auto, always, or never (default "auto")
@@ -29,6 +30,30 @@ Flags:
   --concurrency number  maximum concurrent Jev requests (default 4)
   --format text|json    output format (default "text")
   --refresh-cache       reevaluate and replace current cached results
+
+Eval flags:
+  --clear-cache         clear this project's cached evaluations before evaluating
+  --color mode          color output: auto, always, or never (default "auto")
+  --config path         rule configuration (default "jevlint.json")
+  --concurrency number  maximum concurrent Jev requests (default 4)
+  --evals path          eval cases (default "jevlint-evals.json" next to --config)
+  --format text|json    output format (default "text")
+  --refresh-cache       reevaluate and replace current cached results
+  --rule id             evaluate only this rule's cases
+`
+
+const evalUsage = `Usage:
+  jevlint eval [flags]
+
+Flags:
+  --clear-cache         clear this project's cached evaluations before evaluating
+  --color mode          color output: auto, always, or never (default "auto")
+  --config path         rule configuration (default "jevlint.json")
+  --concurrency number  maximum concurrent Jev requests (default 4)
+  --evals path          eval cases (default "jevlint-evals.json" next to --config)
+  --format text|json    output format (default "text")
+  --refresh-cache       reevaluate and replace current cached results
+  --rule id             evaluate only this rule's cases
 `
 
 const (
@@ -42,6 +67,7 @@ type cliCommand int
 const (
 	commandUnknown cliCommand = iota
 	commandCheck
+	commandEval
 	commandHelp
 )
 
@@ -49,6 +75,8 @@ func parseCLICommand(name string) cliCommand {
 	switch name {
 	case "check":
 		return commandCheck
+	case "eval":
+		return commandEval
 	case "-h", "--help":
 		return commandHelp
 	default:
@@ -60,6 +88,8 @@ func (command cliCommand) String() string {
 	switch command {
 	case commandCheck:
 		return "check"
+	case commandEval:
+		return "eval"
 	case commandHelp:
 		return "help"
 	default:
@@ -131,10 +161,19 @@ func Run(
 		fmt.Fprint(stderr, usage)
 		return exitUsageError
 	}
+	command := parseCLICommand(args[0])
 	if dispatch := handleSpecialCommand(args[0], stderr); dispatch.handled {
 		return dispatch.exitCode
 	}
-	options, exitCode, ready := parseRunOptions(parseCLICommand(args[0]), args[1:], stderr)
+	if command == commandEval {
+		options, exitCode, ready := parseEvalOptions(args[1:], stderr)
+		if !ready {
+			return exitCode
+		}
+		options.output.hints = readTerminalHints(getenv)
+		return executeEval(ctx, options, stdout, stderr, os.UserCacheDir)
+	}
+	options, exitCode, ready := parseRunOptions(command, args[1:], stderr)
 	if !ready {
 		return exitCode
 	}
@@ -199,7 +238,7 @@ func handleSpecialCommand(
 	case commandHelp:
 		fmt.Fprint(stderr, usage)
 		return commandDispatch{exitCode: exitSuccess, handled: true}
-	case commandCheck:
+	case commandCheck, commandEval:
 		return commandDispatch{exitCode: exitSuccess, handled: false}
 	default:
 		fmt.Fprintf(stderr, "jevlint: unknown command %q\n\n%s", command, usage)

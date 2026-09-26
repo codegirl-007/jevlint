@@ -19,6 +19,8 @@ go run ./cmd/jevlint check .
 go run ./cmd/jevlint check --format json src
 go run ./cmd/jevlint check --concurrency 8 src
 go run ./cmd/jevlint check --refresh-cache .
+go run ./cmd/jevlint eval
+go run ./cmd/jevlint eval --rule database-joins --format json
 ```
 
 | Flag | Description |
@@ -121,6 +123,49 @@ affects reporting.
 Entries do not expire automatically. Because `jev-latest` can change without
 changing its name, use `--refresh-cache` to reevaluate and replace cached
 results. Use `--clear-cache` to clear this project's cache before a run.
+
+## Eval
+
+`jevlint eval` scores your rules against fixtures you list in
+`jevlint-evals.json` (next to `--config`, or `--evals`). Check never loads that
+file. Each case names a rule, a fixture relative to the eval file, and
+`expect: pass` or `expect: fail`.
+
+Eval evaluates only that rule. It clears the rule's include and exclude so
+fixtures still run, and keeps kinds, exceptions, localize, and minConfidence.
+A case must evaluate at least one applicable code unit or eval exits `2`.
+
+```json
+{
+  "version": 1,
+  "cases": [
+    {
+      "name": "join-in-code",
+      "rule": "database-joins",
+      "file": "fixtures/orm.go",
+      "expect": "fail"
+    }
+  ]
+}
+```
+
+| Flag | Description |
+| --- | --- |
+| `--clear-cache` | Clear this project's cached evaluations before evaluating. |
+| `--color auto\|always\|never` | Control colored text output. Defaults to `auto`. |
+| `--config path` | Use a different rule file. Its directory becomes the project root. |
+| `--concurrency number` | Set the maximum number of concurrent Jev requests. Defaults to `4`. |
+| `--evals path` | Use a different eval file. Fixtures stay relative to that file. |
+| `--format text\|json` | Select human-readable or machine-readable output. Defaults to `text`. |
+| `--refresh-cache` | Reevaluate code and replace matching cached results. |
+| `--rule id` | Evaluate only this rule's cases. |
+
+Text output is grouped by rule and ends with `N/M eval cases matched expectations`.
+JSON includes per-case confidence when a reportable fail is available.
+
+- `0`: every case matched
+- `1`: at least one case missed its expectation
+- `2`: configuration or runtime error
 
 ## Supported languages
 
