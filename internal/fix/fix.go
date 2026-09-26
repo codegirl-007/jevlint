@@ -20,10 +20,7 @@ import (
 	"jevlint/internal/runner"
 )
 
-const (
-	diagnosticLimit    = 64 * 1024
-	fixWorkspacePrefix = "jevlint-fix-"
-)
+const diagnosticLimit = 64 * 1024
 
 type Options struct {
 	Root         string
@@ -68,27 +65,20 @@ func Generate(ctx context.Context, options Options) (Proposal, error) {
 	if len(options.Command) == 0 {
 		return Proposal{}, fmt.Errorf("ACP agent command is required")
 	}
-	reportProgress(options.Progress, "preparing temporary workspace")
-	workspace, err := os.MkdirTemp("", fixWorkspacePrefix+"*")
-	if err != nil {
-		return Proposal{}, fmt.Errorf("create ACP workspace: %w", err)
-	}
-	removeStaleFixWorkspaces(os.TempDir(), workspace)
-	defer removeFixWorkspace(workspace)
-
-	before, err := mirrorProject(root, workspace, options)
+	reportProgress(options.Progress, "recording project snapshot")
+	snapshot, err := snapshotProject(root, options)
 	if err != nil {
 		return Proposal{}, err
 	}
-	writable := writablePaths(workspace, before)
+	writable := writablePaths(root, snapshot.files)
 	client := &acpClient{
-		root:         workspace,
+		root:         root,
 		writable:     writable,
 		progress:     options.Progress,
 		agentMessage: options.AgentMessage,
 		toolActivity: options.ToolActivity,
 	}
-	mcpServers, err := sessionMCPServers(root, workspace, options.ConfigPath)
+	mcpServers, err := sessionMCPServers(root, options.ConfigPath)
 	if err != nil {
 		return Proposal{}, err
 	}
@@ -96,17 +86,23 @@ func Generate(ctx context.Context, options Options) (Proposal, error) {
 	reportProgress(options.Progress, "waiting for ACP agent to propose edits")
 	if err := runACP(
 		ctx,
-		workspace,
+		root,
 		options.Command,
 		buildPrompt(options.Findings),
 		client,
 		mcpServers,
 	); err != nil {
+		if restoreErr := restoreProject(root, snapshot); restoreErr != nil {
+			return Proposal{}, fmt.Errorf("%w (restore failed: %v)", err, restoreErr)
+		}
 		return Proposal{}, err
 	}
 	reportProgress(options.Progress, "inspecting proposed changes")
-	changes, err := changedFiles(workspace, before)
+	changes, err := changedFiles(root, snapshot)
 	if err != nil {
+		if restoreErr := restoreProject(root, snapshot); restoreErr != nil {
+			return Proposal{}, fmt.Errorf("%w (restore failed: %v)", err, restoreErr)
+		}
 		return Proposal{}, err
 	}
 	return Proposal{
@@ -122,32 +118,32 @@ func reportProgress(progress func(string), message string) {
 }
 
 func writablePaths(
-	workspace string,
-	before map[string][]byte,
+	root string,
+	files map[string]snapshotFile,
 ) map[string]struct{} {
-	writable := make(map[string]struct{}, len(before))
-	for relative := range before {
-		writable[filepath.Join(workspace, filepath.FromSlash(relative))] = struct{}{}
+	writable := make(map[string]struct{}, len(files))
+	for relative := range files {
+		writable[filepath.Join(root, filepath.FromSlash(relative))] = struct{}{}
 	}
 	return writable
 }
 
 func changedFiles(
-	workspace string,
-	before map[string][]byte,
+	root string,
+	snapshot projectSnapshot,
 ) ([]FileChange, error) {
-	if err := rejectUnexpectedFiles(workspace, before); err != nil {
+	if err := rejectUnexpectedFiles(root, snapshot); err != nil {
 		return nil, err
 	}
-	paths := make([]string, 0, len(before))
-	for path := range before {
+	paths := make([]string, 0, len(snapshot.files))
+	for path := range snapshot.files {
 		paths = append(paths, path)
 	}
 	sort.Strings(paths)
 
 	changes := make([]FileChange, 0)
 	for _, relative := range paths {
-		path := filepath.Join(workspace, filepath.FromSlash(relative))
+		path := filepath.Join(root, filepath.FromSlash(relative))
 		info, err := os.Lstat(path)
 		if err != nil {
 			return nil, fmt.Errorf("ACP agent removed %q", relative)
@@ -162,54 +158,45 @@ func changedFiles(
 		if err != nil {
 			return nil, fmt.Errorf("read ACP result %q: %w", relative, err)
 		}
-		if bytes.Equal(before[relative], after) {
+		if bytes.Equal(snapshot.files[relative].content, after) {
 			continue
 		}
 		changes = append(changes, FileChange{
 			Path:   relative,
-			Before: before[relative],
+			Before: snapshot.files[relative].content,
 			After:  after,
 		})
 	}
 	return changes, nil
 }
 
-func rejectUnexpectedFiles(
-	workspace string,
-	before map[string][]byte,
-) error {
-	return filepath.WalkDir(
-		workspace,
-		func(path string, entry os.DirEntry, walkErr error) error {
-			if walkErr != nil {
-				return walkErr
-			}
-			if path == workspace || entry.IsDir() {
-				return nil
-			}
-			relative, err := filepath.Rel(workspace, path)
-			if err != nil {
-				return err
-			}
-			relative = filepath.ToSlash(relative)
-			if _, ok := before[relative]; !ok {
-				return fmt.Errorf("ACP agent created unexpected file %q", relative)
-			}
-			return nil
-		},
-	)
+func rejectUnexpectedFiles(root string, snapshot projectSnapshot) error {
+	current, err := discoverProjectPaths(root, nil, snapshot.exclude)
+	if err != nil {
+		return err
+	}
+	for _, relative := range current {
+		relative = filepath.ToSlash(relative)
+		if _, ok := snapshot.known[relative]; !ok {
+			return fmt.Errorf("ACP agent created unexpected file %q", relative)
+		}
+	}
+	return nil
 }
 
 func sessionMCPServers(
 	root string,
-	workspace string,
 	configPath string,
 ) ([]acp.McpServer, error) {
-	workspaceConfig, err := workspaceConfigPath(root, workspace, configPath)
+	absoluteConfig, err := filepath.Abs(configPath)
 	if err != nil {
 		return nil, err
 	}
-	server, err := checkMCPServer(workspace, workspaceConfig, root)
+	relative, err := filepath.Rel(root, absoluteConfig)
+	if err != nil || !filepath.IsLocal(relative) {
+		return nil, fmt.Errorf("config path must be inside project root")
+	}
+	server, err := checkMCPServer(root, absoluteConfig, root)
 	if err != nil {
 		return nil, err
 	}
@@ -263,28 +250,6 @@ func stopACPProcess(process *exec.Cmd) {
 	_ = syscall.Kill(-process.Process.Pid, syscall.SIGKILL)
 	_ = process.Process.Kill()
 	_ = process.Wait()
-}
-
-func removeFixWorkspace(workspace string) {
-	_ = os.RemoveAll(workspace)
-}
-
-func removeStaleFixWorkspaces(root string, keep string) {
-	entries, err := os.ReadDir(root)
-	if err != nil {
-		return
-	}
-	keep = filepath.Clean(keep)
-	for _, entry := range entries {
-		if !entry.IsDir() || !strings.HasPrefix(entry.Name(), fixWorkspacePrefix) {
-			continue
-		}
-		path := filepath.Join(root, entry.Name())
-		if filepath.Clean(path) == keep {
-			continue
-		}
-		_ = os.RemoveAll(path)
-	}
 }
 
 func runACPSession(
@@ -350,7 +315,7 @@ func buildPrompt(findings []runner.Finding) string {
 	var prompt strings.Builder
 	prompt.WriteString(
 		"Fix every Jevlint finding below by editing the existing files in this " +
-			"safe project snapshot. You may inspect and edit existing project files. " +
+			"project. You may inspect and edit existing project files. " +
 			"Do not create, delete, or rename " +
 			"files. Keep behavior unchanged except where required by the rules. Do " +
 			"not run the jevlint CLI. After edits, call the jevlint_check tool. Do " +

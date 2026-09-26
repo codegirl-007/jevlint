@@ -30,44 +30,62 @@ var excludedDirectoryNames = map[string]struct{}{
 	"venv":         {},
 }
 
-func mirrorProject(
-	root string,
-	workspace string,
-	options Options,
-) (map[string][]byte, error) {
+type snapshotFile struct {
+	content []byte
+	perm    os.FileMode
+}
+
+type projectSnapshot struct {
+	files   map[string]snapshotFile
+	known   map[string]struct{}
+	exclude []string
+}
+
+func snapshotProject(root string, options Options) (projectSnapshot, error) {
 	required, err := requiredProjectPaths(root, options)
 	if err != nil {
-		return nil, err
+		return projectSnapshot{}, err
+	}
+	knownPaths, err := discoverProjectPaths(root, nil, options.Exclude)
+	if err != nil {
+		return projectSnapshot{}, err
 	}
 	paths, err := discoverProjectPaths(root, options.Context, options.Exclude)
 	if err != nil {
-		return nil, err
+		return projectSnapshot{}, err
 	}
 	for path := range required {
 		paths = append(paths, path)
 	}
 	sort.Strings(paths)
 
-	before := make(map[string][]byte, len(paths))
+	snapshot := projectSnapshot{
+		files:   make(map[string]snapshotFile, len(paths)),
+		known:   make(map[string]struct{}, len(knownPaths)+len(required)),
+		exclude: options.Exclude,
+	}
+	for _, relative := range knownPaths {
+		snapshot.known[filepath.ToSlash(relative)] = struct{}{}
+	}
 	for _, relative := range paths {
 		relative = filepath.ToSlash(relative)
-		if _, exists := before[relative]; exists {
+		if _, exists := snapshot.files[relative]; exists {
 			continue
 		}
 		if !filepath.IsLocal(filepath.FromSlash(relative)) {
-			return nil, fmt.Errorf("project path escapes root: %q", relative)
+			return projectSnapshot{}, fmt.Errorf("project path escapes root: %q", relative)
 		}
 		sourcePath := filepath.Join(root, filepath.FromSlash(relative))
 		info, err := os.Lstat(sourcePath)
 		if err != nil {
-			return nil, fmt.Errorf("inspect %q: %w", relative, err)
+			return projectSnapshot{}, fmt.Errorf("inspect %q: %w", relative, err)
 		}
 		if !info.Mode().IsRegular() {
-			return nil, fmt.Errorf("project file %q is not a regular file", relative)
+			return projectSnapshot{}, fmt.Errorf("project file %q is not a regular file", relative)
 		}
 		if isHardExcludedFile(relative) {
 			if _, ok := required[relative]; ok {
-				return nil, fmt.Errorf(
+				return projectSnapshot{}, fmt.Errorf(
 					"required fix file %q is excluded by the safety policy",
 					relative,
 				)
@@ -76,18 +94,45 @@ func mirrorProject(
 		}
 		content, err := os.ReadFile(sourcePath)
 		if err != nil {
-			return nil, fmt.Errorf("read %q: %w", relative, err)
+			return projectSnapshot{}, fmt.Errorf("read %q: %w", relative, err)
 		}
-		destination := filepath.Join(workspace, filepath.FromSlash(relative))
-		if err := os.MkdirAll(filepath.Dir(destination), 0o700); err != nil {
-			return nil, fmt.Errorf("create directory for %q: %w", relative, err)
+		snapshot.files[relative] = snapshotFile{
+			content: content,
+			perm:    info.Mode().Perm(),
 		}
-		if err := os.WriteFile(destination, content, info.Mode().Perm()); err != nil {
-			return nil, fmt.Errorf("mirror %q: %w", relative, err)
-		}
-		before[relative] = content
+		snapshot.known[relative] = struct{}{}
 	}
-	return before, nil
+	return snapshot, nil
+}
+
+func restoreProject(root string, snapshot projectSnapshot) error {
+	current, err := discoverProjectPaths(root, nil, snapshot.exclude)
+	if err != nil {
+		return err
+	}
+	for _, relative := range current {
+		relative = filepath.ToSlash(relative)
+		if _, ok := snapshot.known[relative]; ok {
+			continue
+		}
+		path := filepath.Join(root, filepath.FromSlash(relative))
+		if err := os.Remove(path); err != nil {
+			return fmt.Errorf("remove unexpected file %q: %w", relative, err)
+		}
+	}
+	for relative, file := range snapshot.files {
+		path := filepath.Join(root, filepath.FromSlash(relative))
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			return fmt.Errorf("restore directory for %q: %w", relative, err)
+		}
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("replace %q: %w", relative, err)
+		}
+		if err := os.WriteFile(path, file.content, file.perm); err != nil {
+			return fmt.Errorf("restore %q: %w", relative, err)
+		}
+	}
+	return nil
 }
 
 func requiredProjectPaths(

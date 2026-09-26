@@ -17,7 +17,7 @@ import (
 	"jevlint/internal/runner"
 )
 
-func TestGenerateUsesIsolatedACPWorkspace(t *testing.T) {
+func TestGenerateEditsProjectFiles(t *testing.T) {
 	root := writeFixProject(t)
 	t.Setenv("JEVLINT_ACP_HELPER", "success")
 	var progressMu sync.Mutex
@@ -52,15 +52,15 @@ func TestGenerateUsesIsolatedACPWorkspace(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(original), "Good") {
-		t.Fatalf("Generate() modified project source: %q", original)
+	if !strings.Contains(string(original), "Good") {
+		t.Fatalf("Generate() left project source unchanged: %q", original)
 	}
 	progressMu.Lock()
 	progressText := strings.Join(progress, "\n")
 	messageText := agentText.String()
 	progressMu.Unlock()
 	for _, expected := range []string{
-		"preparing temporary workspace",
+		"recording project snapshot",
 		"starting ACP agent",
 		"waiting for ACP agent to propose edits",
 		"inspecting proposed changes",
@@ -87,9 +87,12 @@ func TestGenerateRejectsUnexpectedFiles(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "created unexpected file") {
 		t.Fatalf("Generate() error = %v", err)
 	}
+	if _, statErr := os.Stat(filepath.Join(root, "extra.go")); !os.IsNotExist(statErr) {
+		t.Fatalf("unexpected file was not restored away: %v", statErr)
+	}
 }
 
-func TestGenerateAcceptsEditsToExistingSnapshotFiles(t *testing.T) {
+func TestGenerateAcceptsEditsToExistingProjectFiles(t *testing.T) {
 	root := writeFixProject(t)
 	t.Setenv("JEVLINT_ACP_HELPER", "modify-context")
 
@@ -129,6 +132,13 @@ func TestGenerateRejectsUnsafeWorkspaceChanges(t *testing.T) {
 			})
 			if err == nil || !strings.Contains(err.Error(), expected) {
 				t.Fatalf("Generate() error = %v, want %q", err, expected)
+			}
+			content, readErr := os.ReadFile(filepath.Join(root, "sample.go"))
+			if readErr != nil {
+				t.Fatal(readErr)
+			}
+			if !strings.Contains(string(content), "Bad") {
+				t.Fatalf("rejected Generate() did not restore sample.go: %q", content)
 			}
 		})
 	}
@@ -170,7 +180,7 @@ func TestBuildPromptDescribesSnapshotAndTargetedChecks(t *testing.T) {
 
 	prompt := buildPrompt([]runner.Finding{testFinding()})
 	for _, expected := range []string{
-		"safe project snapshot",
+		"editing the existing files in this project",
 		"inspect and edit existing project files",
 		"Do not run the jevlint CLI",
 		"call the jevlint_check tool",
@@ -182,39 +192,15 @@ func TestBuildPromptDescribesSnapshotAndTargetedChecks(t *testing.T) {
 	}
 }
 
-func TestRemoveStaleFixWorkspacesLeavesCurrent(t *testing.T) {
-	root := t.TempDir()
-	stale, err := os.MkdirTemp(root, fixWorkspacePrefix+"*")
-	if err != nil {
-		t.Fatal(err)
-	}
-	keep, err := os.MkdirTemp(root, fixWorkspacePrefix+"*")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	removeStaleFixWorkspaces(root, keep)
-	if _, err := os.Stat(stale); !os.IsNotExist(err) {
-		t.Fatalf("stale workspace still exists: %v", err)
-	}
-	if _, err := os.Stat(keep); err != nil {
-		t.Fatalf("current workspace was removed: %v", err)
-	}
-}
-
-func TestSessionMCPServersUsesWorkspaceConfig(t *testing.T) {
+func TestSessionMCPServersUsesProjectRoot(t *testing.T) {
 	t.Parallel()
 
 	root := t.TempDir()
-	workspace := t.TempDir()
 	if err := os.WriteFile(filepath.Join(root, "jevlint.json"), []byte("{}\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(workspace, "jevlint.json"), []byte("{}\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
 
-	servers, err := sessionMCPServers(root, workspace, filepath.Join(root, "jevlint.json"))
+	servers, err := sessionMCPServers(root, filepath.Join(root, "jevlint.json"))
 	if err != nil {
 		t.Fatalf("sessionMCPServers() error = %v", err)
 	}

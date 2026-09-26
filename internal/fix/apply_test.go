@@ -66,6 +66,32 @@ func TestApplyRejectsStaleFile(t *testing.T) {
 	}
 }
 
+func TestRestoreChangesWritesBefore(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	path := filepath.Join(root, "sample.go")
+	if err := os.WriteFile(path, []byte("after\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+
+	err := RestoreChanges(root, []FileChange{{
+		Path:   "sample.go",
+		Before: []byte("before\n"),
+		After:  []byte("after\n"),
+	}})
+	if err != nil {
+		t.Fatalf("RestoreChanges() error = %v", err)
+	}
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(content) != "before\n" {
+		t.Fatalf("RestoreChanges() wrote %q, want before", content)
+	}
+}
+
 func TestApplyRejectsEscapingPath(t *testing.T) {
 	t.Parallel()
 

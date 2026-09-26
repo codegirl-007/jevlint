@@ -331,6 +331,16 @@ func prepareFixProposal(
 		}
 	}
 	if err := fix.ValidateSyntax(extractor, proposal.Changes); err != nil {
+		if restoreErr := fix.RestoreChanges(
+			filepath.Dir(configPath),
+			proposal.Changes,
+		); restoreErr != nil {
+			return fix.Proposal{}, fmt.Errorf(
+				"proposed fix has invalid syntax: %w (restore failed: %v)",
+				err,
+				restoreErr,
+			)
+		}
 		return fix.Proposal{}, rejectedFixError{
 			message: "proposed fix has invalid syntax: " + err.Error(),
 		}
@@ -391,6 +401,10 @@ func finishFix(
 	projectRoot string,
 ) int {
 	if validation.HasFailures() {
+		if err := fix.RestoreChanges(projectRoot, proposal.Changes); err != nil {
+			fmt.Fprintf(stderr, "jevlint: restore rejected fix: %v\n", err)
+			return 2
+		}
 		return writeRejectedFix(
 			stdout,
 			stderr,
@@ -400,22 +414,12 @@ func finishFix(
 			color,
 		)
 	}
-	if err := fix.Apply(projectRoot, proposal.Changes); err != nil {
-		fmt.Fprintf(stderr, "jevlint: apply fix: %v\n", err)
-		return 2
-	}
-	diff, err := fix.UnifiedDiff(proposal.Changes)
-	if err != nil {
-		fmt.Fprintf(stderr, "jevlint: render fix diff: %v\n", err)
-		return 2
-	}
 	if err := writeFixOutput(
 		stdout,
 		fixOutput{
 			Validated:     true,
 			Applied:       true,
 			ModifiedFiles: proposalPaths(proposal),
-			Diff:          diff,
 			Findings:      []runner.Finding{},
 		},
 		format,
@@ -435,17 +439,11 @@ func writeRejectedFix(
 	format string,
 	color string,
 ) int {
-	diff, err := fix.UnifiedDiff(proposal.Changes)
-	if err != nil {
-		fmt.Fprintf(stderr, "jevlint: render rejected fix diff: %v\n", err)
-		return 2
-	}
 	if err := writeFixOutput(
 		stdout,
 		fixOutput{
 			ModifiedFiles: proposalPaths(proposal),
 			Findings:      validation.Findings,
-			Diff:          diff,
 		},
 		format,
 		color,
@@ -490,29 +488,24 @@ func writeFixOutput(
 		return encoder.Encode(output)
 	}
 	style := outputStyle{color: shouldUseColor(color, writer)}
-	diff := highlightedFixDiff(output.Diff, style.color)
 	if !output.Validated {
 		fmt.Fprintf(
 			writer,
 			"\n  %s %s\n\n",
 			style.paint("1;33", "!"),
-			style.paint("1;33", "Proposed diff (rejected)"),
+			style.paint("1;33", "Proposed changes (rejected)"),
 		)
 		writeModifiedFiles(writer, style, output.ModifiedFiles)
-		fmt.Fprint(writer, diff)
-		if !strings.HasSuffix(diff, "\n") {
-			fmt.Fprintln(writer)
-		}
-		fmt.Fprintf(writer, "\n%s\n", style.paint("1", "Validation feedback"))
+		fmt.Fprintf(writer, "%s\n", style.paint("1", "Validation feedback"))
 		for _, finding := range output.Findings {
 			writeFinding(writer, style, finding)
 		}
 		writeSummary(writer, style, output.Findings)
 		return nil
 	}
-	heading := "Validated proposed diff"
+	heading := "Validated proposed changes"
 	if output.Applied {
-		heading = "Applied proposed diff"
+		heading = "Applied proposed changes"
 	}
 	fmt.Fprintf(
 		writer,
@@ -521,8 +514,7 @@ func writeFixOutput(
 		style.paint("1;32", heading),
 	)
 	writeModifiedFiles(writer, style, output.ModifiedFiles)
-	_, err := fmt.Fprint(writer, diff)
-	return err
+	return nil
 }
 
 func writeModifiedFiles(writer io.Writer, style outputStyle, paths []string) {

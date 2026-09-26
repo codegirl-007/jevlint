@@ -9,7 +9,7 @@ import (
 	"jevlint/internal/runner"
 )
 
-func TestMirrorProjectBuildsSafeProjectSnapshot(t *testing.T) {
+func TestSnapshotProjectBuildsSafeProjectSnapshot(t *testing.T) {
 	t.Parallel()
 
 	root := t.TempDir()
@@ -43,10 +43,9 @@ func TestMirrorProjectBuildsSafeProjectSnapshot(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	workspace := t.TempDir()
-	before, err := mirrorProject(root, workspace, Options{})
+	snapshot, err := snapshotProject(root, Options{})
 	if err != nil {
-		t.Fatalf("mirrorProject() error = %v", err)
+		t.Fatalf("snapshotProject() error = %v", err)
 	}
 	for _, expected := range []string{
 		".gitignore",
@@ -59,8 +58,8 @@ func TestMirrorProjectBuildsSafeProjectSnapshot(t *testing.T) {
 		"sample_test.go",
 		"scripts/check",
 	} {
-		if _, ok := before[expected]; !ok {
-			t.Errorf("snapshot is missing %q: %#v", expected, before)
+		if _, ok := snapshot.files[expected]; !ok {
+			t.Errorf("snapshot is missing %q: %#v", expected, snapshot.files)
 		}
 	}
 	for _, excluded := range []string{
@@ -70,20 +69,16 @@ func TestMirrorProjectBuildsSafeProjectSnapshot(t *testing.T) {
 		"nested/drop.generated",
 		"node_modules/dependency.js",
 	} {
-		if _, ok := before[excluded]; ok {
+		if _, ok := snapshot.files[excluded]; ok {
 			t.Errorf("snapshot contains excluded path %q", excluded)
 		}
 	}
-	info, err := os.Stat(filepath.Join(workspace, "scripts", "check"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if info.Mode().Perm() != 0o700 {
-		t.Fatalf("mirrored script mode = %o, want 700", info.Mode().Perm())
+	if snapshot.files["scripts/check"].perm != 0o700 {
+		t.Fatalf("snapshot script mode = %o, want 700", snapshot.files["scripts/check"].perm)
 	}
 }
 
-func TestMirrorProjectAppliesContextAndExcludePatterns(t *testing.T) {
+func TestSnapshotProjectAppliesContextAndExcludePatterns(t *testing.T) {
 	t.Parallel()
 
 	root := t.TempDir()
@@ -97,28 +92,28 @@ func TestMirrorProjectAppliesContextAndExcludePatterns(t *testing.T) {
 		writeWorkspaceFile(t, root, path, content, 0o600)
 	}
 
-	before, err := mirrorProject(root, t.TempDir(), Options{
+	snapshot, err := snapshotProject(root, Options{
 		ConfigPath: filepath.Join(root, "jevlint.json"),
 		Context:    []string{"docs/**"},
 		Exclude:    []string{"docs/private/**"},
 		Findings:   []runner.Finding{testFinding()},
 	})
 	if err != nil {
-		t.Fatalf("mirrorProject() error = %v", err)
+		t.Fatalf("snapshotProject() error = %v", err)
 	}
 	for _, expected := range []string{"docs/public.md", "jevlint.json", "sample.go"} {
-		if _, ok := before[expected]; !ok {
-			t.Errorf("snapshot is missing required path %q: %#v", expected, before)
+		if _, ok := snapshot.files[expected]; !ok {
+			t.Errorf("snapshot is missing required path %q: %#v", expected, snapshot.files)
 		}
 	}
 	for _, excluded := range []string{"docs/private/note.md", "sibling.go"} {
-		if _, ok := before[excluded]; ok {
+		if _, ok := snapshot.files[excluded]; ok {
 			t.Errorf("snapshot contains excluded path %q", excluded)
 		}
 	}
 }
 
-func TestMirrorProjectRejectsRequiredSecretFile(t *testing.T) {
+func TestSnapshotProjectRejectsRequiredSecretFile(t *testing.T) {
 	t.Parallel()
 
 	root := t.TempDir()
@@ -126,11 +121,11 @@ func TestMirrorProjectRejectsRequiredSecretFile(t *testing.T) {
 	finding := testFinding()
 	finding.Path = ".env"
 
-	_, err := mirrorProject(root, t.TempDir(), Options{
+	_, err := snapshotProject(root, Options{
 		Findings: []runner.Finding{finding},
 	})
 	if err == nil || !strings.Contains(err.Error(), "excluded by the safety policy") {
-		t.Fatalf("mirrorProject() error = %v", err)
+		t.Fatalf("snapshotProject() error = %v", err)
 	}
 }
 

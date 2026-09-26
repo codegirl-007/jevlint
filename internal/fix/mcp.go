@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 
 	acp "github.com/coder/acp-go-sdk"
 
@@ -288,16 +287,4 @@ func writeMCPMessage(writer io.Writer, payload []byte) error {
 		return flusher.Flush()
 	}
 	return nil
-}
-
-func workspaceConfigPath(root string, workspace string, configPath string) (string, error) {
-	absoluteConfig, err := filepath.Abs(configPath)
-	if err != nil {
-		return "", err
-	}
-	relative, err := filepath.Rel(root, absoluteConfig)
-	if err != nil || !filepath.IsLocal(relative) {
-		return "", fmt.Errorf("config path must be inside project root")
-	}
-	return filepath.Join(workspace, relative), nil
 }

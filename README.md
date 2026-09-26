@@ -110,14 +110,14 @@ Jevlint sends extracted source code and file metadata to TypeSafe.
 
 ## Autofix
 
-`jevlint fix` asks a pre-authenticated ACP agent to fix current findings and
-writes a validated proposal to the project. `jevlint check --fix` prints the
-findings first, then does the same. Writes happen only after Jev validation
-succeeds and the files on disk still match the snapshot used to generate the
-proposal. Rejected proposals are never written.
+`jevlint fix` asks a pre-authenticated ACP agent to fix current findings in
+the project directory. `jevlint check --fix` prints the findings first, then
+does the same. The agent edits project files in place. Jevlint records a
+before-image first; if inspect or Jev validation fails, those bytes are
+written back and unexpected files are removed. Accepted edits stay on disk.
 The session attaches a `jevlint_check` MCP tool. The agent is told to call
 that tool, not the `jevlint` CLI, and not finish until the check reports no
-findings. Progress is written to stderr while the final diff or JSON is
+findings. Progress is written to stderr while the result or JSON is
 written to stdout.
 
 Configure any ACP agent command:
@@ -130,9 +130,9 @@ Configure any ACP agent command:
 }
 ```
 
-By default, the temporary workspace contains the safe, non-ignored project
-tree. Use `fix.context` to narrow that read-only context and `fix.exclude` for
-additional project-specific exclusions:
+By default, the agent may read and edit the safe, non-ignored project tree.
+Use `fix.context` to narrow that set and `fix.exclude` for additional
+project-specific exclusions:
 
 ```json
 {
@@ -149,30 +149,29 @@ Common choices are
 [Codex ACP](https://github.com/agentclientprotocol/codex-acp), and Gemini CLI
 with `["gemini", "--acp"]`.
 
-Jevlint mirrors regular project files into a temporary directory, respecting
-nested `.gitignore` files. It always excludes version-control metadata,
-dependency and build directories, symlinks, special files, and common secret
-files such as `.env`, private keys, and package-manager credentials. Finding
-files and `jevlint.json` remain available when `fix.context` narrows the
-snapshot.
+Jevlint records regular project files in memory before the agent starts,
+respecting nested `.gitignore` files. It always excludes version-control
+metadata, dependency and build directories, symlinks, special files, and
+common secret files such as `.env`, private keys, and package-manager
+credentials. Finding files and `jevlint.json` remain writable when
+`fix.context` narrows the set.
 
 The session includes a `jevlint_check` MCP tool so the agent can re-run Jevlint
-on the snapshot. It must keep fixing until that check reports no findings.
+on the project. It must keep fixing until that check reports no findings.
 The tool only checks; it cannot apply fixes. Mid-session checks use the project
 evaluation cache so unchanged units are not sent to Jev again. The opening
-`--fix` check and the final validation stay uncached. Temporary
-`jevlint-fix-*` workspaces are deleted after the agent process tree exits.
-Terminals stay disabled.
+`--fix` check and the final validation stay uncached. Terminals stay disabled.
 
-The agent can read and edit mirrored files. After the session, Jevlint rejects
-created, deleted, or replaced files. Proposed source must parse and pass Jev
-validation before its diff is shown. Candidate evaluations are not cached. The
-ACP client does not provide terminal access, though the configured agent
-executable may have its own local tools for targeted formatting and tests.
+The agent can read and edit existing project files. After the session, Jevlint
+rejects created, deleted, or replaced files and restores the before-image.
+Proposed source must parse and pass Jev validation; otherwise the before-image
+is restored. Candidate evaluations are not cached. The ACP client does not
+provide terminal access, though the configured agent executable may have its
+own local tools for targeted formatting and tests.
 
-The configured agent is an external process and may send mirrored source to its
-model provider. The temporary workspace is not an operating-system sandbox; the
-command still runs as your user. Use only agents and providers you trust.
+The configured agent is an external process and may send project source to its
+model provider. Autofix is not an operating-system sandbox; the command still
+runs as your user. Use only agents and providers you trust.
 
 ## Cache
 
@@ -217,7 +216,7 @@ before a run. `--fix` also bypasses the cache.
 - Database provenance and cross-function data flow are not traced.
 - Jev returns a constrained choice, not a free-form explanation.
 - Autofix cannot create, delete, or rename files.
-- `fix` and `--fix` write only validated edits to existing snapshot files.
+- `fix` and `--fix` keep only validated edits to existing project files.
 
 ## Exit codes
 

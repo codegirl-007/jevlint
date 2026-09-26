@@ -160,7 +160,7 @@ func (client *acpClient) containedPath(path string) (string, error) {
 	path = filepath.Clean(path)
 	relative, err := filepath.Rel(client.root, path)
 	if err != nil || !filepath.IsLocal(relative) {
-		return "", fmt.Errorf("ACP path escapes temporary workspace: %q", path)
+		return "", fmt.Errorf("ACP path escapes project root: %q", path)
 	}
 	return path, nil
 }
@@ -168,7 +168,7 @@ func (client *acpClient) containedPath(path string) (string, error) {
 func requireRegularContainedFile(root string, path string) error {
 	relative, err := filepath.Rel(root, path)
 	if err != nil || !filepath.IsLocal(relative) {
-		return fmt.Errorf("ACP path escapes temporary workspace: %q", path)
+		return fmt.Errorf("ACP path escapes project root: %q", path)
 	}
 	parts := strings.Split(filepath.Clean(relative), string(os.PathSeparator))
 	current := root

@@ -178,7 +178,6 @@ func TestWriteFixOutputIncludesRejectedProposal(t *testing.T) {
 
 	output := fixOutput{
 		ModifiedFiles: []string{"sample.go"},
-		Diff:          "--- a/sample.go\n+++ b/sample.go\n@@ -1 +1 @@\n-func Old() {}\n+func New() {}\n",
 		Findings: []runner.Finding{{
 			RuleID:      "short-functions",
 			Description: "Functions must not exceed seven lines.",
@@ -198,10 +197,9 @@ func TestWriteFixOutputIncludesRejectedProposal(t *testing.T) {
 		t.Fatalf("write text fix output: %v", err)
 	}
 	for _, expected := range []string{
-		"Proposed diff (rejected)",
+		"Proposed changes (rejected)",
 		"Modified files",
 		"M sample.go",
-		"+func New() {}",
 		"Validation feedback",
 		"short-functions",
 		"Summary",
@@ -213,6 +211,9 @@ func TestWriteFixOutputIncludesRejectedProposal(t *testing.T) {
 	if strings.Contains(text.String(), "0 files") {
 		t.Fatalf("text output includes synthetic scan totals: %q", text.String())
 	}
+	if strings.Contains(text.String(), "--- a/") || strings.Contains(text.String(), "+func New") {
+		t.Fatalf("text output still includes a diff: %q", text.String())
+	}
 
 	validated := output
 	validated.Validated = true
@@ -222,10 +223,9 @@ func TestWriteFixOutputIncludesRejectedProposal(t *testing.T) {
 		t.Fatalf("write accepted text fix output: %v", err)
 	}
 	for _, expected := range []string{
-		"Validated proposed diff",
+		"Validated proposed changes",
 		"Modified files",
 		"M sample.go",
-		"+func New() {}",
 	} {
 		if !strings.Contains(accepted.String(), expected) {
 			t.Fatalf("accepted output = %q, want %q", accepted.String(), expected)
@@ -240,7 +240,7 @@ func TestWriteFixOutputIncludesRejectedProposal(t *testing.T) {
 	if err := json.Unmarshal(encoded.Bytes(), &decoded); err != nil {
 		t.Fatalf("decode JSON fix output: %v", err)
 	}
-	if decoded.Diff != output.Diff ||
+	if decoded.Diff != "" ||
 		decoded.Validated ||
 		len(decoded.ModifiedFiles) != 1 ||
 		decoded.ModifiedFiles[0] != "sample.go" {
