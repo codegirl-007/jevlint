@@ -9,8 +9,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"strconv"
-	"strings"
 
 	acp "github.com/coder/acp-go-sdk"
 
@@ -34,7 +32,7 @@ type mcpToolCall struct {
 	Arguments json.RawMessage `json:"arguments"`
 }
 
-func checkMCPServer(workspace string, configPath string) (acp.McpServer, error) {
+func checkMCPServer(workspace string, configPath string, cacheRoot string) (acp.McpServer, error) {
 	executable, err := os.Executable()
 	if err != nil {
 		return acp.McpServer{}, fmt.Errorf("resolve jevlint executable: %w", err)
@@ -47,6 +45,7 @@ func checkMCPServer(workspace string, configPath string) (acp.McpServer, error) 
 			Env: []acp.EnvVariable{
 				{Name: "JEVLINT_MCP_ROOT", Value: workspace},
 				{Name: "JEVLINT_MCP_CONFIG", Value: configPath},
+				{Name: "JEVLINT_MCP_CACHE_ROOT", Value: cacheRoot},
 			},
 		},
 	}, nil
@@ -86,7 +85,7 @@ func handleMCPRequest(ctx context.Context, request mcpRequest) ([]byte, error) {
 	switch request.Method {
 	case "initialize":
 		return mcpResult(request.ID, map[string]any{
-			"protocolVersion": "2024-11-05",
+			"protocolVersion": initializeProtocolVersion(request.Params),
 			"capabilities": map[string]any{
 				"tools": map[string]any{},
 			},
@@ -102,8 +101,8 @@ func handleMCPRequest(ctx context.Context, request mcpRequest) ([]byte, error) {
 			"tools": []map[string]any{{
 				"name": checkToolName,
 				"description": "Run Jevlint check on the current workspace. " +
-					"Does not apply fixes. You must call this and get no findings " +
-					"before finishing an autofix.",
+					"Does not apply fixes. Uses the project evaluation cache. " +
+					"You must call this and get no findings before finishing an autofix.",
 				"inputSchema": map[string]any{
 					"type":       "object",
 					"properties": map[string]any{},
@@ -153,8 +152,16 @@ func runWorkspaceCheck(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	cacheRoot := os.Getenv("JEVLINT_MCP_CACHE_ROOT")
+	if cacheRoot == "" {
+		cacheRoot = root
+	}
+	resultCache, err := evaluation.NewFileCache(cacheRoot)
+	if err != nil {
+		return "", fmt.Errorf("evaluation cache: %w", err)
+	}
 	evaluator, err := evaluation.NewTypeSafeFromEnvWithOptions(
-		evaluation.TypeSafeOptions{},
+		evaluation.TypeSafeOptions{Cache: resultCache},
 	)
 	if err != nil {
 		return "", err
@@ -213,40 +220,53 @@ func jsonRaw(id json.RawMessage) any {
 	return value
 }
 
+func initializeProtocolVersion(params json.RawMessage) string {
+	const fallback = "2024-11-05"
+	var decoded struct {
+		ProtocolVersion string `json:"protocolVersion"`
+	}
+	if err := json.Unmarshal(params, &decoded); err != nil {
+		return fallback
+	}
+	switch decoded.ProtocolVersion {
+	case "2024-11-05", "2025-03-26", "2025-06-18":
+		return decoded.ProtocolVersion
+	default:
+		return fallback
+	}
+}
+
 func readMCPMessage(reader *bufio.Reader) ([]byte, error) {
-	headers := make(map[string]string)
 	for {
-		line, err := reader.ReadString('\n')
+		line, err := reader.ReadBytes('\n')
 		if err != nil {
+			if err == io.EOF {
+				line = bytes.TrimSpace(line)
+				if len(line) > 0 {
+					return line, nil
+				}
+			}
 			return nil, err
 		}
-		line = strings.TrimRight(line, "\r\n")
-		if line == "" {
-			break
+		line = bytes.TrimSpace(line)
+		if len(line) == 0 {
+			continue
 		}
-		name, value, ok := strings.Cut(line, ":")
-		if !ok {
-			return nil, fmt.Errorf("invalid MCP header %q", line)
-		}
-		headers[strings.ToLower(strings.TrimSpace(name))] = strings.TrimSpace(value)
+		return line, nil
 	}
-	size, err := strconv.Atoi(headers["content-length"])
-	if err != nil || size < 0 {
-		return nil, fmt.Errorf("invalid MCP Content-Length")
-	}
-	payload := make([]byte, size)
-	if _, err := io.ReadFull(reader, payload); err != nil {
-		return nil, err
-	}
-	return payload, nil
 }
 
 func writeMCPMessage(writer io.Writer, payload []byte) error {
-	var output bytes.Buffer
-	fmt.Fprintf(&output, "Content-Length: %d\r\n\r\n", len(payload))
-	output.Write(payload)
-	_, err := writer.Write(output.Bytes())
-	return err
+	if _, err := writer.Write(payload); err != nil {
+		return err
+	}
+	if _, err := writer.Write([]byte{'\n'}); err != nil {
+		return err
+	}
+	if flusher, ok := writer.(interface{ Flush() error }); ok {
+		return flusher.Flush()
+	}
+	return nil
 }
 
 func workspaceConfigPath(root string, workspace string, configPath string) (string, error) {

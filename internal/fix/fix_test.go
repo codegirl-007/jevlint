@@ -172,13 +172,65 @@ func TestBuildPromptDescribesSnapshotAndTargetedChecks(t *testing.T) {
 	for _, expected := range []string{
 		"safe project snapshot",
 		"inspect and edit existing project files",
-		"targeted formatters, type checks, or tests",
-		"call jevlint_check",
+		"Do not run the jevlint CLI",
+		"call the jevlint_check tool",
 		"Do not finish until jevlint_check reports no findings",
 	} {
 		if !strings.Contains(prompt, expected) {
 			t.Fatalf("buildPrompt() = %q, want %q", prompt, expected)
 		}
+	}
+}
+
+func TestRemoveStaleFixWorkspacesLeavesCurrent(t *testing.T) {
+	stale, err := os.MkdirTemp("", fixWorkspacePrefix+"*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	keep, err := os.MkdirTemp("", fixWorkspacePrefix+"*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = os.RemoveAll(keep)
+	})
+
+	removeStaleFixWorkspaces(keep)
+	if _, err := os.Stat(stale); !os.IsNotExist(err) {
+		t.Fatalf("stale workspace still exists: %v", err)
+	}
+	if _, err := os.Stat(keep); err != nil {
+		t.Fatalf("current workspace was removed: %v", err)
+	}
+}
+
+func TestSessionMCPServersUsesWorkspaceConfig(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	workspace := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "jevlint.json"), []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workspace, "jevlint.json"), []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	servers, err := sessionMCPServers(root, workspace, filepath.Join(root, "jevlint.json"))
+	if err != nil {
+		t.Fatalf("sessionMCPServers() error = %v", err)
+	}
+	if len(servers) != 1 || servers[0].Stdio == nil || servers[0].Stdio.Args[0] != "mcp-check" {
+		t.Fatalf("sessionMCPServers() = %#v", servers)
+	}
+	var cacheRoot string
+	for _, env := range servers[0].Stdio.Env {
+		if env.Name == "JEVLINT_MCP_CACHE_ROOT" {
+			cacheRoot = env.Value
+		}
+	}
+	if cacheRoot != root {
+		t.Fatalf("JEVLINT_MCP_CACHE_ROOT = %q, want %q", cacheRoot, root)
 	}
 }
 

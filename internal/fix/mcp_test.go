@@ -11,13 +11,18 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 )
 
 func TestCheckMCPServerUsesHiddenCommand(t *testing.T) {
 	t.Parallel()
 
-	server, err := checkMCPServer("/tmp/workspace", "/tmp/workspace/jevlint.json")
+	server, err := checkMCPServer(
+		"/tmp/workspace",
+		"/tmp/workspace/jevlint.json",
+		"/tmp/project",
+	)
 	if err != nil {
 		t.Fatalf("checkMCPServer() error = %v", err)
 	}
@@ -27,22 +32,27 @@ func TestCheckMCPServerUsesHiddenCommand(t *testing.T) {
 		server.Stdio.Args[0] != "mcp-check" {
 		t.Fatalf("checkMCPServer() = %#v", server)
 	}
-	var root, configPath string
+	var root, configPath, cacheRoot string
 	for _, env := range server.Stdio.Env {
 		switch env.Name {
 		case "JEVLINT_MCP_ROOT":
 			root = env.Value
 		case "JEVLINT_MCP_CONFIG":
 			configPath = env.Value
+		case "JEVLINT_MCP_CACHE_ROOT":
+			cacheRoot = env.Value
 		}
 	}
-	if root != "/tmp/workspace" || configPath != "/tmp/workspace/jevlint.json" {
+	if root != "/tmp/workspace" ||
+		configPath != "/tmp/workspace/jevlint.json" ||
+		cacheRoot != "/tmp/project" {
 		t.Fatalf("checkMCPServer() env = %#v", server.Stdio.Env)
 	}
 }
 
 func TestServeCheckListsAndRunsTool(t *testing.T) {
 	root := t.TempDir()
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 	if err := os.WriteFile(
 		filepath.Join(root, "jevlint.json"),
 		[]byte(`{
@@ -86,6 +96,7 @@ func TestServeCheckListsAndRunsTool(t *testing.T) {
 	t.Setenv("TYPESAFE_DEFAULT_MODEL", "jev-test")
 	t.Setenv("JEVLINT_MCP_ROOT", root)
 	t.Setenv("JEVLINT_MCP_CONFIG", filepath.Join(root, "jevlint.json"))
+	t.Setenv("JEVLINT_MCP_CACHE_ROOT", root)
 
 	var input bytes.Buffer
 	writeMCPMessage(&input, []byte(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`))
@@ -111,6 +122,96 @@ func TestServeCheckListsAndRunsTool(t *testing.T) {
 	}
 	if !strings.Contains(string(messages[2]), `\"ok\":false`) {
 		t.Fatalf("tools/call missing failure flag: %s", messages[2])
+	}
+}
+
+func TestServeCheckUsesNewlineDelimitedJSON(t *testing.T) {
+	var input bytes.Buffer
+	input.WriteString(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26"}}` + "\n")
+	input.WriteString(`{"jsonrpc":"2.0","method":"notifications/initialized"}` + "\n")
+	input.WriteString(`{"jsonrpc":"2.0","id":2,"method":"ping","params":{}}` + "\n")
+
+	var output bytes.Buffer
+	if err := ServeCheck(context.Background(), &input, &output); err != nil {
+		t.Fatalf("ServeCheck() error = %v", err)
+	}
+	if strings.Contains(output.String(), "Content-Length") {
+		t.Fatalf("ServeCheck() used LSP framing:\n%s", output.String())
+	}
+	messages := readAllMCPMessages(t, output.Bytes())
+	if len(messages) != 2 {
+		t.Fatalf("ServeCheck() messages = %d, want 2: %s", len(messages), output.String())
+	}
+	if !strings.Contains(string(messages[0]), `"protocolVersion":"2025-03-26"`) {
+		t.Fatalf("initialize = %s", messages[0])
+	}
+	if bytes.Contains(messages[0], []byte{'\n'}) {
+		t.Fatalf("initialize response contained an embedded newline: %q", messages[0])
+	}
+}
+
+func TestServeCheckUsesCacheOnRepeat(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	if err := os.WriteFile(
+		filepath.Join(root, "jevlint.json"),
+		[]byte(`{
+			"languages": {"go": {}},
+			"rules": [{
+				"id": "database-joins",
+				"description": "Join related records in the database.",
+				"severity": "error",
+				"include": ["**/*.go"]
+			}]
+		}`),
+		0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(root, "sample.go"),
+		[]byte("package sample\n\nfunc JoinInCode() { println(\"join\") }\n"),
+		0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(
+		func(writer http.ResponseWriter, _ *http.Request) {
+			calls.Add(1)
+			writer.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(writer, `{
+				"model": "jev-test",
+				"answers": {
+					"database-joins": {
+						"type": "choice",
+						"choice": "fail",
+						"confidence": 1
+					}
+				}
+			}`)
+		},
+	))
+	defer server.Close()
+	t.Setenv("TYPESAFE_API_KEY", "sk-test")
+	t.Setenv("TYPESAFE_BASE_URL", server.URL)
+	t.Setenv("TYPESAFE_DEFAULT_MODEL", "jev-test")
+	t.Setenv("JEVLINT_MCP_ROOT", root)
+	t.Setenv("JEVLINT_MCP_CONFIG", filepath.Join(root, "jevlint.json"))
+	t.Setenv("JEVLINT_MCP_CACHE_ROOT", root)
+
+	if _, err := runWorkspaceCheck(context.Background()); err != nil {
+		t.Fatalf("first check: %v", err)
+	}
+	afterFirst := calls.Load()
+	if _, err := runWorkspaceCheck(context.Background()); err != nil {
+		t.Fatalf("second check: %v", err)
+	}
+	if calls.Load() != afterFirst {
+		t.Fatalf("Jev requests grew from %d to %d; second check should hit cache", afterFirst, calls.Load())
+	}
+	if afterFirst < 1 {
+		t.Fatal("first check made no Jev requests")
 	}
 }
 

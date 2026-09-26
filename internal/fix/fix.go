@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 
 	acp "github.com/coder/acp-go-sdk"
@@ -19,7 +20,10 @@ import (
 	"jevlint/internal/runner"
 )
 
-const diagnosticLimit = 64 * 1024
+const (
+	diagnosticLimit    = 64 * 1024
+	fixWorkspacePrefix = "jevlint-fix-"
+)
 
 type Options struct {
 	Root         string
@@ -65,11 +69,12 @@ func Generate(ctx context.Context, options Options) (Proposal, error) {
 		return Proposal{}, fmt.Errorf("ACP agent command is required")
 	}
 	reportProgress(options.Progress, "preparing temporary workspace")
-	workspace, err := os.MkdirTemp("", "jevlint-fix-*")
+	workspace, err := os.MkdirTemp("", fixWorkspacePrefix+"*")
 	if err != nil {
 		return Proposal{}, fmt.Errorf("create ACP workspace: %w", err)
 	}
-	defer os.RemoveAll(workspace)
+	removeStaleFixWorkspaces(workspace)
+	defer removeFixWorkspace(workspace)
 
 	before, err := mirrorProject(root, workspace, options)
 	if err != nil {
@@ -83,6 +88,10 @@ func Generate(ctx context.Context, options Options) (Proposal, error) {
 		agentMessage: options.AgentMessage,
 		toolActivity: options.ToolActivity,
 	}
+	mcpServers, err := sessionMCPServers(root, workspace, options.ConfigPath)
+	if err != nil {
+		return Proposal{}, err
+	}
 	reportProgress(options.Progress, "starting ACP agent")
 	reportProgress(options.Progress, "waiting for ACP agent to propose edits")
 	if err := runACP(
@@ -91,6 +100,7 @@ func Generate(ctx context.Context, options Options) (Proposal, error) {
 		options.Command,
 		buildPrompt(options.Findings),
 		client,
+		mcpServers,
 	); err != nil {
 		return Proposal{}, err
 	}
@@ -190,15 +200,33 @@ func rejectUnexpectedFiles(
 	)
 }
 
+func sessionMCPServers(
+	root string,
+	workspace string,
+	configPath string,
+) ([]acp.McpServer, error) {
+	workspaceConfig, err := workspaceConfigPath(root, workspace, configPath)
+	if err != nil {
+		return nil, err
+	}
+	server, err := checkMCPServer(workspace, workspaceConfig, root)
+	if err != nil {
+		return nil, err
+	}
+	return []acp.McpServer{server}, nil
+}
+
 func runACP(
 	ctx context.Context,
 	workspace string,
 	command []string,
 	prompt string,
 	client *acpClient,
+	mcpServers []acp.McpServer,
 ) error {
 	process := exec.CommandContext(ctx, command[0], command[1:]...)
 	process.Dir = workspace
+	process.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	stdin, err := process.StdinPipe()
 	if err != nil {
 		return fmt.Errorf("open ACP stdin: %w", err)
@@ -215,12 +243,9 @@ func runACP(
 
 	connection := acp.NewClientSideConnection(client, stdin, stdout)
 	connection.SetLogger(slog.New(slog.NewTextHandler(io.Discard, nil)))
-	sessionErr := runACPSession(ctx, connection, workspace, prompt)
+	sessionErr := runACPSession(ctx, connection, workspace, prompt, mcpServers)
 	_ = stdin.Close()
-	if process.Process != nil {
-		_ = process.Process.Kill()
-	}
-	_ = process.Wait()
+	stopACPProcess(process)
 	if sessionErr != nil {
 		detail := strings.TrimSpace(diagnostics.String())
 		if detail != "" {
@@ -231,11 +256,43 @@ func runACP(
 	return nil
 }
 
+func stopACPProcess(process *exec.Cmd) {
+	if process == nil || process.Process == nil {
+		return
+	}
+	_ = syscall.Kill(-process.Process.Pid, syscall.SIGKILL)
+	_ = process.Process.Kill()
+	_ = process.Wait()
+}
+
+func removeFixWorkspace(workspace string) {
+	_ = os.RemoveAll(workspace)
+}
+
+func removeStaleFixWorkspaces(keep string) {
+	entries, err := os.ReadDir(os.TempDir())
+	if err != nil {
+		return
+	}
+	keep = filepath.Clean(keep)
+	for _, entry := range entries {
+		if !entry.IsDir() || !strings.HasPrefix(entry.Name(), fixWorkspacePrefix) {
+			continue
+		}
+		path := filepath.Join(os.TempDir(), entry.Name())
+		if filepath.Clean(path) == keep {
+			continue
+		}
+		_ = os.RemoveAll(path)
+	}
+}
+
 func runACPSession(
 	ctx context.Context,
 	connection *acp.ClientSideConnection,
 	workspace string,
 	prompt string,
+	mcpServers []acp.McpServer,
 ) error {
 	response, err := connection.Initialize(ctx, acp.InitializeRequest{
 		ProtocolVersion: acp.ProtocolVersionNumber,
@@ -261,7 +318,7 @@ func runACPSession(
 	}
 	session, err := connection.NewSession(ctx, acp.NewSessionRequest{
 		Cwd:        workspace,
-		McpServers: []acp.McpServer{},
+		McpServers: mcpServers,
 	})
 	if err != nil {
 		return fmt.Errorf("create ACP session: %w", err)
@@ -295,13 +352,11 @@ func buildPrompt(findings []runner.Finding) string {
 		"Fix every Jevlint finding below by editing the existing files in this " +
 			"safe project snapshot. You may inspect and edit existing project files. " +
 			"Do not create, delete, or rename " +
-			"files. Keep behavior unchanged except where required by the rules. Run " +
-			"targeted formatters, type checks, or tests when their dependencies are " +
-			"available; unavailable project services or dependencies are not a reason " +
-			"to broaden the change. After edits, call jevlint_check. Do not finish " +
-			"until jevlint_check reports no findings. If it still reports findings, " +
-			"keep fixing those files and check again. Jevlint will also perform a " +
-			"final validation after you stop.\n",
+			"files. Keep behavior unchanged except where required by the rules. Do " +
+			"not run the jevlint CLI. After edits, call the jevlint_check tool. Do " +
+			"not finish until jevlint_check reports no findings. If it still reports " +
+			"findings, keep fixing those files and check again. Jevlint will also " +
+			"perform a final validation after you stop.\n",
 	)
 	for _, finding := range findings {
 		fmt.Fprintf(
