@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 
+	tree_sitter "github.com/tree-sitter/go-tree-sitter"
+
 	"jevlint/internal/config"
 )
 
@@ -255,7 +257,7 @@ func TestExtractRejectsInvalidInput(t *testing.T) {
 	}
 }
 
-func TestExtractReusesCompiledQueries(t *testing.T) {
+func TestExtractTwiceOnSameExtractor(t *testing.T) {
 	t.Parallel()
 
 	extractor := testExtractor(t, "go")
@@ -273,6 +275,27 @@ func TestExtractReusesCompiledQueries(t *testing.T) {
 	}
 	if first[0].Name != second[0].Name {
 		t.Fatalf("Extract() names = %q then %q", first[0].Name, second[0].Name)
+	}
+}
+
+func TestExtractDoesNotRecompileQueries(t *testing.T) {
+	extractor := testExtractor(t, "go")
+	original := newQuery
+	compiles := 0
+	newQuery = func(
+		language *tree_sitter.Language,
+		source string,
+	) (*tree_sitter.Query, *tree_sitter.QueryError) {
+		compiles++
+		return original(language, source)
+	}
+	t.Cleanup(func() { newQuery = original })
+
+	if _, err := extractor.Extract("sample.go", []byte("package sample\n\nfunc Read() {}\n")); err != nil {
+		t.Fatalf("Extract() error = %v", err)
+	}
+	if compiles != 0 {
+		t.Fatalf("Extract compiled %d queries, want 0", compiles)
 	}
 }
 
@@ -347,6 +370,13 @@ func TestNewExtractorRejectsInvalidLanguageConfiguration(t *testing.T) {
 				"rust": {},
 			},
 			want: `language extension ".rs" is assigned to both "go" and "rust"`,
+		},
+		"unknown after compiled": {
+			languages: map[string]config.Language{
+				"go":   {},
+				"nope": {},
+			},
+			want: `unknown language preset "nope"`,
 		},
 		"invalid query": {
 			languages: map[string]config.Language{

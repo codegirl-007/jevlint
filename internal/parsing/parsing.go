@@ -263,7 +263,7 @@ func (extractor *Extractor) Extract(path string, source []byte) ([]CodeUnit, err
 	defer tree.Close()
 
 	root := tree.RootNode()
-	functions, err := extractMatches(
+	functions := extractMatches(
 		spec,
 		path,
 		source,
@@ -272,10 +272,7 @@ func (extractor *Extractor) Extract(path string, source []byte) ([]CodeUnit, err
 		"function",
 		CodeKindFunction,
 	)
-	if err != nil {
-		return nil, err
-	}
-	types, err := extractMatches(
+	types := extractMatches(
 		spec,
 		path,
 		source,
@@ -284,13 +281,7 @@ func (extractor *Extractor) Extract(path string, source []byte) ([]CodeUnit, err
 		"type",
 		CodeKindType,
 	)
-	if err != nil {
-		return nil, err
-	}
-	declarations, err := extractTypeDeclarations(spec, path, source, root, types)
-	if err != nil {
-		return nil, err
-	}
+	declarations := extractTypeDeclarations(spec, path, source, root, types)
 	attachRelatedTypes(functions, declarations)
 
 	units := append(functions, types...)
@@ -328,7 +319,7 @@ func extractTypeDeclarations(
 	source []byte,
 	root *tree_sitter.Node,
 	types []CodeUnit,
-) ([]TypeDeclaration, error) {
+) []TypeDeclaration {
 	declarations := make([]TypeDeclaration, 0, len(types))
 	for _, unit := range types {
 		declarations = append(declarations, TypeDeclaration{
@@ -341,7 +332,7 @@ func extractTypeDeclarations(
 		})
 	}
 	if spec.typeContextQuery != nil {
-		contextTypes, err := extractMatches(
+		contextTypes := extractMatches(
 			spec,
 			path,
 			source,
@@ -350,9 +341,6 @@ func extractTypeDeclarations(
 			"type",
 			CodeKindType,
 		)
-		if err != nil {
-			return nil, err
-		}
 		for _, unit := range contextTypes {
 			declarations = append(declarations, TypeDeclaration{
 				Name:      unit.Name,
@@ -364,7 +352,7 @@ func extractTypeDeclarations(
 			})
 		}
 	}
-	return declarations, nil
+	return declarations
 }
 
 func attachRelatedTypes(functions []CodeUnit, declarations []TypeDeclaration) {
@@ -413,7 +401,7 @@ func extractMatches(
 	query *tree_sitter.Query,
 	captureName string,
 	kind CodeKind,
-) ([]CodeUnit, error) {
+) []CodeUnit {
 	cursor := tree_sitter.NewQueryCursor()
 	defer cursor.Close()
 
@@ -442,7 +430,7 @@ func extractMatches(
 			nameNode,
 		))
 	}
-	return units, nil
+	return units
 }
 
 const identifierCapture = "name"
