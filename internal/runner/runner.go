@@ -136,7 +136,7 @@ func (runner Runner) Evaluate(ctx context.Context, cfg config.Config, options Op
 		jobs,
 		setup.concurrency,
 		func(ctx context.Context, job evaluationJob) (evaluationOutcome, error) {
-			return evaluateJob(ctx, runner.Evaluator, job, cfg.MinimumConfidence())
+			return evaluateJob(ctx, runner.Evaluator, job, cfg)
 		},
 	)
 	if err != nil {
@@ -148,7 +148,7 @@ func (runner Runner) Evaluate(ctx context.Context, cfg config.Config, options Op
 		runner.Evaluator,
 		pending,
 		setup.concurrency,
-		cfg.MinimumConfidence(),
+		cfg,
 	)
 	if err != nil {
 		return Report{}, err
@@ -552,7 +552,7 @@ func evaluateJob(
 	ctx context.Context,
 	evaluator evaluation.Evaluator,
 	job evaluationJob,
-	minConfidence float64,
+	cfg config.Config,
 ) (evaluationOutcome, error) {
 	results, err := evaluator.Evaluate(ctx, evaluation.Batch{
 		Rules:    job.rules,
@@ -592,7 +592,7 @@ func evaluateJob(
 		outcome.evaluations++
 
 		if result.Status == evaluation.StatusPass ||
-			result.Confidence < minConfidence {
+			result.Confidence < cfg.ConfidenceFloor(rule) {
 			continue
 		}
 		outcome.findings = append(outcome.findings, pendingFinding{
@@ -639,7 +639,7 @@ func localizeFindings(
 	evaluator evaluation.Evaluator,
 	findings []pendingFinding,
 	concurrency int,
-	minConfidence float64,
+	cfg config.Config,
 ) (int, error) {
 	jobs := localizationJobs(findings)
 	outcomes, err := runJobs(
@@ -647,7 +647,7 @@ func localizeFindings(
 		jobs,
 		concurrency,
 		func(ctx context.Context, job localizationJob) (localizationOutcome, error) {
-			return evaluateLocalizationJob(ctx, evaluator, job, minConfidence)
+			return evaluateLocalizationJob(ctx, evaluator, job, cfg)
 		},
 	)
 	if err != nil {
@@ -684,7 +684,7 @@ func evaluateLocalizationJob(
 	ctx context.Context,
 	evaluator evaluation.Evaluator,
 	job localizationJob,
-	minConfidence float64,
+	cfg config.Config,
 ) (localizationOutcome, error) {
 	candidate := parsing.CodeUnit{
 		Kind:         parsing.CodeKindRegion,
@@ -735,7 +735,7 @@ func evaluateLocalizationJob(
 
 	outcome := localizationOutcome{findingIndex: job.findingIndex}
 	if result.Status == evaluation.StatusFail &&
-		result.Confidence >= minConfidence {
+		result.Confidence >= cfg.ConfidenceFloor(job.rule) {
 		outcome.location = &Location{
 			Category:    job.region.Category.String(),
 			Kind:        string(job.region.Kind),

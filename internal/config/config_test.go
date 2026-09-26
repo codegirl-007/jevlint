@@ -53,6 +53,51 @@ func TestDecodeMinConfidence(t *testing.T) {
 	if floor.MinConfidence == nil || *floor.MinConfidence != 0.8 {
 		t.Fatalf("Decode() minConfidence = %#v, want 0.8", floor.MinConfidence)
 	}
+
+	ruleZero, err := Decode(strings.NewReader(withGoLanguage(`{
+		"rules": [{
+			"id": "one",
+			"description": "A rule.",
+			"severity": "info",
+			"minConfidence": 0
+		}]
+	}`)))
+	if err != nil {
+		t.Fatalf("Decode() rule minConfidence error = %v", err)
+	}
+	if ruleZero.Rules[0].MinConfidence == nil || *ruleZero.Rules[0].MinConfidence != 0 {
+		t.Fatalf("Decode() rule minConfidence = %#v, want 0", ruleZero.Rules[0].MinConfidence)
+	}
+
+	ruleFloor, err := Decode(strings.NewReader(withGoLanguage(`{
+		"rules": [{
+			"id": "one",
+			"description": "A rule.",
+			"severity": "info",
+			"minConfidence": 0.8
+		}]
+	}`)))
+	if err != nil {
+		t.Fatalf("Decode() rule minConfidence error = %v", err)
+	}
+	if ruleFloor.Rules[0].MinConfidence == nil || *ruleFloor.Rules[0].MinConfidence != 0.8 {
+		t.Fatalf("Decode() rule minConfidence = %#v, want 0.8", ruleFloor.Rules[0].MinConfidence)
+	}
+}
+
+func TestConfidenceFloorPrefersRuleWhenSet(t *testing.T) {
+	t.Parallel()
+
+	global := 0.8
+	ruleZero := 0.0
+	cfg := Config{MinConfidence: &global}
+
+	if got := cfg.ConfidenceFloor(Rule{}); got != 0.8 {
+		t.Fatalf("omitted rule floor = %v, want global 0.8", got)
+	}
+	if got := cfg.ConfidenceFloor(Rule{MinConfidence: &ruleZero}); got != 0 {
+		t.Fatalf("rule floor = %v, want 0", got)
+	}
 }
 
 func TestDecodeRejectsInvalidConfig(t *testing.T) {
@@ -129,6 +174,28 @@ func TestDecodeValidationErrors(t *testing.T) {
 				"rules": [{"id": "one", "description": "A rule.", "severity": "info"}]
 			}`,
 			want: "minConfidence must be between 0 and 1",
+		},
+		"rule minConfidence below zero": {
+			input: `{
+				"rules": [{
+					"id": "one",
+					"description": "A rule.",
+					"severity": "info",
+					"minConfidence": -0.1
+				}]
+			}`,
+			want: "rules[0].minConfidence must be between 0 and 1",
+		},
+		"rule minConfidence above one": {
+			input: `{
+				"rules": [{
+					"id": "one",
+					"description": "A rule.",
+					"severity": "info",
+					"minConfidence": 1.1
+				}]
+			}`,
+			want: "rules[0].minConfidence must be between 0 and 1",
 		},
 		"missing id takes precedence": {
 			input: `{"rules": [{

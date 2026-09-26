@@ -601,6 +601,46 @@ func (lowConfidencePassEvaluator) Evaluate(
 	return results, nil
 }
 
+func TestCheckRuleMinConfidenceOverridesGlobal(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	source := "package sample\n\n// FeatureFlags controls behavior.\n" +
+		"type FeatureFlags struct {\n\tFlag bool\n\tIsReady bool\n}\n\n" +
+		"func ReadFlags() {}\n"
+	if err := os.WriteFile(filepath.Join(root, "flags.go"), []byte(source), 0o600); err != nil {
+		t.Fatalf("write source: %v", err)
+	}
+
+	global := 0.8
+	allowAll := 0.0
+	cfg := config.Config{
+		MinConfidence: &global,
+		Rules: []config.Rule{{
+			ID:            "boolean-property-naming",
+			Description:   "Boolean fields clearly describe the true state.",
+			Severity:      config.SeverityWarning,
+			Kinds:         []config.TargetKind{config.TargetKindType},
+			Localize:      []config.TargetKind{config.TargetKindField},
+			MinConfidence: &allowAll,
+		}},
+	}
+	evaluator := &scoredBooleanEvaluator{typeConfidence: 0.6, regionConfidence: 0.5}
+	report, err := (Runner{
+		Extractor: testGoExtractor(t),
+		Evaluator: evaluator,
+	}).Evaluate(context.Background(), cfg, Options{Root: root, Concurrency: 1})
+	if err != nil {
+		t.Fatalf("Check() error = %v", err)
+	}
+	if len(report.Findings) != 1 {
+		t.Fatalf("findings = %#v, want the fail at 0.6 when the rule floor is 0", report.Findings)
+	}
+	if len(report.Findings[0].Locations) != 1 {
+		t.Fatalf("locations = %#v, want the region fail under the rule floor", report.Findings[0].Locations)
+	}
+}
+
 func TestCheckLocalizeIgnoresRegionFailsBelowMinConfidence(t *testing.T) {
 	t.Parallel()
 

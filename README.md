@@ -91,7 +91,8 @@ customize a preset, but it cannot load an arbitrary external grammar.
   skip the second pass. Each matching region is another Jev request on a fail,
   up to 24 regions per function or type.
 - `minConfidence`: optional `0`–`1`. Omit or `0` uses every Jev result. Failures
-  below the minimum are not reported.
+  below the minimum are not reported. A rule `minConfidence` overrides the
+  global value when set.
 
 ## How it works
 
