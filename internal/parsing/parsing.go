@@ -324,6 +324,7 @@ func (extractor *Extractor) Extract(path string, source []byte) ([]CodeUnit, err
 	regions := extractRegions(root, source, spec.regionKinds)
 	markDocComments(units, regions)
 	attachRegions(units, regions)
+	units = append(units, standaloneComments(spec, path, source, units, regions)...)
 	sortCodeUnits(units)
 	return units, nil
 }
@@ -610,12 +611,97 @@ func extractRegions(
 }
 
 // documentationAnchor returns the node that should carry a doc comment.
+//
+// Some grammars wrap a declaration in a transparent parent (a Python decorator
+// or a JS/TS export or ambient statement). Leading comments are siblings of
+// that wrapper, not of the inner declaration, so the anchor walks outward to it.
 func documentationAnchor(node *tree_sitter.Node) *tree_sitter.Node {
-	parent := node.Parent()
-	if parent != nil && parent.Kind() == "decorated_definition" {
-		return parent
+	anchor := node
+	for {
+		parent := anchor.Parent()
+		if parent == nil || !isDocumentationWrapper(parent.Kind()) {
+			return anchor
+		}
+		anchor = parent
 	}
-	return node
+}
+
+// isDocumentationWrapper reports whether a node is a transparent parent that can
+// carry the leading comment of the declaration it wraps.
+func isDocumentationWrapper(kind string) bool {
+	switch kind {
+	case "decorated_definition", "export_statement", "ambient_declaration":
+		return true
+	default:
+		return false
+	}
+}
+
+// standaloneComments returns units for comments that are not attached to any
+// function or type, so rules can evaluate file headers and comments on
+// declarations the unit queries do not capture (variables, imports, ...).
+//
+// A standalone comment immediately followed by code (at most one newline away)
+// is reported as a doc comment for that code; otherwise it is a plain comment.
+func standaloneComments(
+	spec languageSpec,
+	path string,
+	source []byte,
+	units []CodeUnit,
+	regions []Region,
+) []CodeUnit {
+	attached := make(map[Region]struct{})
+	for index := range units {
+		for _, region := range units[index].Regions {
+			attached[region] = struct{}{}
+		}
+	}
+	comments := make([]CodeUnit, 0)
+	for _, region := range regions {
+		if region.Category != CodeKindComment && region.Category != CodeKindDocComment {
+			continue
+		}
+		if _, ok := attached[region]; ok {
+			continue
+		}
+		kind := CodeKindComment
+		if commentLeadsCode(source, region.EndByte) {
+			kind = CodeKindDocComment
+		}
+		comments = append(comments, CodeUnit{
+			Kind:        kind,
+			Name:        fmt.Sprintf("%s:%d", filepath.Base(path), region.StartLine),
+			Language:    spec.id,
+			Path:        path,
+			Source:      region.Source,
+			StartLine:   region.StartLine,
+			EndLine:     region.EndLine,
+			StartColumn: region.StartColumn,
+			EndColumn:   region.EndColumn,
+			StartByte:   region.StartByte,
+			EndByte:     region.EndByte,
+		})
+	}
+	return comments
+}
+
+// commentLeadsCode reports whether a comment is immediately followed by code
+// (at most one newline away), so it reads as documentation for that code.
+func commentLeadsCode(source []byte, endByte uint) bool {
+	newlines := 0
+	for index := int(endByte); index < len(source); index++ {
+		switch source[index] {
+		case '\n':
+			newlines++
+			if newlines > 1 {
+				return false
+			}
+		case ' ', '\t', '\r':
+		default:
+			return true
+		}
+	}
+	return false
 }
 
 // leadingCommentStart walks back over the comments that belong to a node.

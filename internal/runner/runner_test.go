@@ -449,6 +449,62 @@ func TestCheckEvaluatesDocCommentsSeparatelyFromComments(t *testing.T) {
 	}
 }
 
+func TestCheckEvaluatesStandaloneComments(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	source := "package sample\n\n" +
+		"// File header.\n\n" +
+		"// Config holds settings.\n" +
+		"var Config = 1\n\n" +
+		"func Read() {\n" +
+		"\t// Keep going.\n" +
+		"\tprintln(Config)\n" +
+		"}\n"
+	writeFile(t, filepath.Join(root, "sample.go"), source)
+
+	cfg := config.Config{Rules: []config.Rule{
+		{
+			ID:          "comments",
+			Description: "Comments are clear.",
+			Severity:    config.SeverityWarning,
+			Kinds: []config.TargetKind{
+				config.TargetKindComment,
+				config.TargetKindDocComment,
+			},
+		},
+	}}
+	evaluator := &capturingEvaluator{}
+	if _, err := (Runner{
+		Extractor: testGoExtractor(t),
+		Evaluator: evaluator,
+	}).Evaluate(context.Background(), cfg, Options{Root: root, Concurrency: 1}); err != nil {
+		t.Fatalf("Check() error = %v", err)
+	}
+
+	byName := map[string]parsing.CodeUnit{}
+	for _, batch := range evaluator.batches {
+		byName[batch.CodeUnit.Name] = batch.CodeUnit
+	}
+	header, ok := byName["sample.go:3"]
+	if !ok || header.Kind != parsing.CodeKindComment {
+		t.Fatalf("file header batch = %#v", byName)
+	}
+	if header.Source != "// File header." {
+		t.Fatalf("file header source = %q", header.Source)
+	}
+	varComment, ok := byName["sample.go:5"]
+	if !ok || varComment.Kind != parsing.CodeKindDocComment {
+		t.Fatalf("var comment batch = %#v", byName)
+	}
+	if varComment.Source != "// Config holds settings." {
+		t.Fatalf("var comment source = %q", varComment.Source)
+	}
+	if _, ok := byName["Read:comment"]; !ok {
+		t.Fatalf("attached comment batch missing: %#v", byName)
+	}
+}
+
 func TestUnitsForRulesDeduplicatesRegionsUsingClosestParent(t *testing.T) {
 	region := parsing.Region{
 		Category:  parsing.CodeKindComment,
