@@ -475,6 +475,7 @@ func extractMatches(
 	matches := cursor.Matches(query, root, source)
 	unitIndex, nameIndex, haveCaptures := captureIndexes(query, captureName)
 	units := make([]CodeUnit, 0)
+	seen := make(map[unitRange]struct{})
 	for {
 		match := matches.Next()
 		if match == nil {
@@ -488,6 +489,11 @@ func extractMatches(
 		if unitNode == nil || nameNode == nil {
 			continue
 		}
+		key := unitRange{start: unitNode.StartByte(), end: unitNode.EndByte()}
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
 		units = append(units, codeUnitFromNodes(
 			spec,
 			path,
@@ -498,6 +504,13 @@ func extractMatches(
 		))
 	}
 	return units
+}
+
+// unitRange identifies a code unit by the source span it covers, so the same
+// span matched by more than one query pattern is only extracted once.
+type unitRange struct {
+	start uint
+	end   uint
 }
 
 const identifierCapture = "name"
@@ -700,7 +713,41 @@ const javascriptFunctionQuery = `
 
 (variable_declarator
   name: (identifier) @name
-  value: [(arrow_function) (function_expression)] @function)
+  value: [(arrow_function) (function_expression) (generator_function)] @function)
+
+; A callback passed to a wrapper call that is assigned to a variable is treated
+; as the implementation of that variable, e.g. const foo = wrapper(() => {}).
+; The wrapper's name does not matter; only the AST shape does.
+(variable_declarator
+  name: (identifier) @name
+  value: (call_expression
+    arguments: (arguments
+      [(arrow_function) (function_expression) (generator_function)] @function)))
+
+; Test callbacks, named by their description: it("...", () => {}) and
+; test("...", function () {}).
+(call_expression
+  function: (identifier) @_test_function
+  arguments: (arguments
+    .
+    (string (string_fragment) @name)
+    .
+    [(arrow_function) (function_expression)] @function)
+  (#any-of? @_test_function "it" "test"))
+
+; Qualified test callbacks: it.only(...), it.skip(...), test.only(...),
+; test.skip(...).
+(call_expression
+  function: (member_expression
+    object: (identifier) @_test_object
+    property: (property_identifier) @_test_modifier)
+  arguments: (arguments
+    .
+    (string (string_fragment) @name)
+    .
+    [(arrow_function) (function_expression)] @function)
+  (#any-of? @_test_object "it" "test")
+  (#any-of? @_test_modifier "only" "skip"))
 `
 
 const javascriptTypeQuery = `
