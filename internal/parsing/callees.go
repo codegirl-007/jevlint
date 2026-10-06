@@ -104,7 +104,15 @@ func resolveFunctionCallees(
 			continue
 		}
 		seen[identity] = struct{}{}
-		resolved = append(resolved, calleeContextFrom(*target))
+		resolved = append(resolved, CalleeContext{
+			Name:      target.Name,
+			Path:      target.Path,
+			Source:    target.Source,
+			StartLine: target.StartLine,
+			EndLine:   target.EndLine,
+			StartByte: target.StartByte,
+			EndByte:   target.EndByte,
+		})
 	}
 	if len(resolved) == 0 {
 		return nil
@@ -154,19 +162,6 @@ func calleeIdentity(unit CodeUnit) string {
 		unit.Name,
 		unit.Source,
 	}, "\x00")
-}
-
-// calleeContextFrom builds the sent context for a called function.
-func calleeContextFrom(unit CodeUnit) CalleeContext {
-	return CalleeContext{
-		Name:      unit.Name,
-		Path:      unit.Path,
-		Source:    unit.Source,
-		StartLine: unit.StartLine,
-		EndLine:   unit.EndLine,
-		StartByte: unit.StartByte,
-		EndByte:   unit.EndByte,
-	}
 }
 
 // attachCallRefs records the calls made inside each function.

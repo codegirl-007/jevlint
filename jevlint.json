@@ -298,6 +298,159 @@
       "include": ["**/*"],
       "exclude": ["**/examples/**"],
       "localize": ["statement"]
+    },
+    {
+      "id": "pipeline-state-proliferation",
+      "description": "Fail when a processing pipeline introduces several intermediate structs, wrappers, or state representations that mostly carry the same information from one stage to the next. Prefer a smaller number of stable domain representations when intermediate types exist primarily to rename, copy, or temporarily hold data. Distinct intermediate types pass when they enforce different invariants, cross an important boundary, materially transform the data, or prevent invalid states.",
+      "severity": "warning",
+      "kinds": ["function", "type"],
+      "context": {
+        "callees": true
+      },
+      "include": ["**/*"],
+      "exclude": ["**/examples/**"]
+    },
+    {
+      "id": "orchestrator-too-many-responsibilities",
+      "description": "Fail orchestration code that directly owns too many independent stages of a workflow, such as discovery, parsing, filtering, scheduling, execution, transformation, caching, localization, and reporting. A coordinator should primarily compose well-defined operations rather than implement substantial logic for most stages itself. Small orchestration functions, cohesive pipelines, and state machines whose steps inherently belong together pass.",
+      "severity": "warning",
+      "kinds": ["function", "type"],
+      "context": {
+        "callees": true
+      },
+      "include": ["**/*"],
+      "exclude": ["**/examples/**"]
+    },
+    {
+      "id": "implementation-detail-leak",
+      "description": "Fail when callers, neighboring packages, or higher-level abstractions must understand an internal implementation detail of another component in order to behave correctly. Examples include callers needing to distinguish internal retry calls, localization passes, cache probes, instrumentation calls, or synthetic units from normal operations. Prefer keeping such distinctions inside the component that owns them. Explicit public protocol states and intentionally exposed lifecycle events pass.",
+      "severity": "warning",
+      "kinds": ["function", "type"],
+      "context": {
+        "callees": true
+      },
+      "include": ["**/*"],
+      "exclude": ["**/examples/**"]
+    },
+    {
+      "id": "observer-reconstructs-domain-state",
+      "description": "Fail wrappers, decorators, hooks, or observers that intercept lower-level operations and reconstruct higher-level domain results because the underlying API does not expose those results directly. Prefer returning or emitting the domain information callers actually need. Instrumentation, metrics, tracing, logging, testing spies, and adapters that merely observe behavior without rebuilding application state pass.",
+      "severity": "warning",
+      "kinds": ["function", "type"],
+      "context": {
+        "callees": true
+      },
+      "include": ["**/*"],
+      "exclude": ["**/examples/**"]
+    },
+    {
+      "id": "duplicate-domain-types",
+      "description": "Fail when multiple internal types represent the same closed domain concept and code repeatedly converts between them without a meaningful boundary. Examples include separate enums for the same code kind, status, mode, or category followed by string-based or switch-based conversion. Distinct transport, persistence, protocol, or public API representations pass when the conversion isolates a real boundary.",
+      "severity": "warning",
+      "kinds": ["function", "type"],
+      "context": {
+        "callees": true
+      },
+      "include": ["**/*"],
+      "exclude": ["**/examples/**"]
+    },
+    {
+      "id": "round-trip-type-conversion",
+      "description": "Fail internal conversions that turn a typed domain value into a less-typed representation such as a string and immediately parse or map it back into another equivalent typed domain value. Prefer directly sharing or explicitly mapping the domain type. Serialization, protocol boundaries, user input, logging, persistence, and compatibility conversion pass.",
+      "severity": "warning",
+      "kinds": ["function"],
+      "context": {
+        "callees": true
+      },
+      "include": ["**/*"],
+      "exclude": ["**/examples/**"],
+      "localize": ["statement"]
+    },
+    {
+      "id": "domain-object-context-bloat",
+      "description": "Fail domain objects that accumulate fields used only by unrelated downstream processing stages, causing one type to act simultaneously as parsed data, enriched context, execution state, and presentation state. Prefer keeping the core domain object small and attaching optional processing context separately. Fields that are intrinsic to the object's identity or broadly useful representation pass.",
+      "severity": "warning",
+      "kinds": ["type"],
+      "include": ["**/*"],
+      "exclude": ["**/examples/**"],
+      "localize": ["field"]
+    },
+    {
+      "id": "optional-feature-pollutes-core-path",
+      "description": "Fail optional functionality when supporting it introduces branches, special states, extra representations, or lifecycle handling throughout the main execution path. Prefer isolating optional behavior behind a decorator, strategy, post-processing phase, or clearly bounded component. A small local conditional or feature that genuinely changes the central domain workflow passes.",
+      "severity": "warning",
+      "kinds": ["function", "type"],
+      "context": {
+        "callees": true
+      },
+      "include": ["**/*"],
+      "exclude": ["**/examples/**"]
+    },
+    {
+      "id": "pseudo-semantic-analysis",
+      "description": "Fail code that builds substantial machinery to infer semantic relationships that the available information cannot reliably establish. Examples include approximating symbol resolution, type resolution, call graphs, ownership, or data flow using only names or syntactic proximity while presenting the result as resolved context. Conservative heuristics with explicit uncertainty and small scope pass when false associations are avoided and the value justifies the machinery.",
+      "severity": "warning",
+      "kinds": ["function", "type"],
+      "context": {
+        "callees": true
+      },
+      "include": ["**/*"],
+      "exclude": ["**/examples/**"]
+    },
+    {
+      "id": "heuristic-complexity-outweighs-confidence",
+      "description": "Fail heuristic code whose implementation complexity is high relative to the certainty or value of the result it produces. Warning signs include many filtering rules, ambiguity cases, ranking rules, limits, fallback paths, or exception conditions around an inherently uncertain approximation. Heuristics pass when they are simple, clearly bounded, measurably valuable, or required because authoritative information is unavailable.",
+      "severity": "warning",
+      "kinds": ["function", "type"],
+      "context": {
+        "callees": true
+      },
+      "include": ["**/*"],
+      "exclude": ["**/examples/**"]
+    },
+    {
+      "id": "parallel-pipeline-duplication",
+      "description": "Fail when a secondary workflow recreates much of the primary workflow using parallel job types, result types, scheduling, aggregation, and error handling instead of reusing the primary domain operation. Prefer expressing the secondary behavior as a mode, decorator, post-processing step, or consumer of the primary result when the workflows differ only in a small portion of behavior. Truly distinct workflows pass.",
+      "severity": "warning",
+      "kinds": ["function", "type"],
+      "context": {
+        "callees": true
+      },
+      "include": ["**/*"],
+      "exclude": ["**/examples/**"]
+    },
+    {
+      "id": "internal-api-missing-domain-result",
+      "description": "Fail APIs that expose only low-level operations when several callers must independently aggregate, classify, count, or reinterpret those operations into the same higher-level domain result. Prefer making that domain result a first-class return value or type. General-purpose low-level libraries and cases where callers intentionally need different interpretations pass.",
+      "severity": "warning",
+      "kinds": ["function", "type"],
+      "context": {
+        "callees": true
+      },
+      "include": ["**/*"],
+      "exclude": ["**/examples/**"]
+    },
+    {
+      "id": "configuration-model-runtime-leak",
+      "description": "Fail when configuration-oriented representations are carried deeply into runtime execution and repeatedly parsed, converted, or interpreted there. Prefer validating and compiling configuration into runtime domain types near the configuration boundary. Runtime interpretation passes when values are intentionally dynamic or must preserve their original external representation.",
+      "severity": "warning",
+      "kinds": ["function", "type"],
+      "context": {
+        "callees": true
+      },
+      "include": ["**/*"],
+      "exclude": ["**/examples/**"]
+    },
+    {
+      "id": "special-case-backpressure",
+      "description": "Fail designs where adding one feature requires unrelated components to add explicit checks or exceptions for that feature's special state. Examples include reporters ignoring synthetic evaluations, metrics excluding internal operations, callers detecting special unit kinds, or test infrastructure compensating for hidden secondary passes. Prefer encapsulating the special behavior at its source. Cross-cutting policies that legitimately apply throughout the system pass.",
+      "severity": "warning",
+      "kinds": ["function", "type"],
+      "context": {
+        "callees": true
+      },
+      "include": ["**/*"],
+      "exclude": ["**/examples/**"]
     }
   ]
 }

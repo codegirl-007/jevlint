@@ -80,8 +80,68 @@ type Location struct {
 
 // evaluationJob is one piece of code and the rules to check against it.
 type evaluationJob struct {
-	rules []config.Rule
+	rules []checkRule
 	unit  parsing.CodeUnit
+}
+
+// checkRule is one rule with its config target kinds resolved once for the run.
+type checkRule struct {
+	rule     config.Rule
+	kinds    map[parsing.CodeKind]struct{}
+	localize map[parsing.CodeKind]struct{}
+}
+
+// compileRules resolves each rule's config kinds once, at the run boundary.
+func compileRules(rules []config.Rule) []checkRule {
+	compiled := make([]checkRule, 0, len(rules))
+	for _, rule := range rules {
+		compiled = append(compiled, checkRule{
+			rule:     rule,
+			kinds:    resolveKinds(rule.Kinds),
+			localize: resolveKinds(rule.Localize),
+		})
+	}
+	return compiled
+}
+
+// resolveKinds turns config target kinds into parsed code kinds.
+func resolveKinds(kinds []config.TargetKind) map[parsing.CodeKind]struct{} {
+	if len(kinds) == 0 {
+		return nil
+	}
+	resolved := make(map[parsing.CodeKind]struct{}, len(kinds))
+	for _, kind := range kinds {
+		parsed, err := parsing.ParseCodeKind(kind.String())
+		if err != nil {
+			continue
+		}
+		resolved[parsed] = struct{}{}
+	}
+	return resolved
+}
+
+// appliesTo reports whether the rule checks a given kind.
+func (rule checkRule) appliesTo(kind parsing.CodeKind) bool {
+	if len(rule.kinds) == 0 {
+		return kind == parsing.CodeKindFunction || kind == parsing.CodeKindType
+	}
+	_, ok := rule.kinds[kind]
+	return ok
+}
+
+// localizesTo reports whether the rule can point at a given kind of region.
+func (rule checkRule) localizesTo(category parsing.CodeKind) bool {
+	_, ok := rule.localize[category]
+	return ok
+}
+
+// configRules returns the underlying config rules for evaluation.
+func configRules(rules []checkRule) []config.Rule {
+	out := make([]config.Rule, len(rules))
+	for index, rule := range rules {
+		out[index] = rule.rule
+	}
+	return out
 }
 
 // evaluationOutcome is the result of one job.
@@ -93,14 +153,14 @@ type evaluationOutcome struct {
 // pendingFinding is a finding that may still gain a location.
 type pendingFinding struct {
 	finding Finding
-	rule    config.Rule
+	rule    checkRule
 	unit    parsing.CodeUnit
 }
 
 // localizationJob is one attempt to point at the exact place that failed.
 type localizationJob struct {
 	findingIndex int
-	rule         config.Rule
+	rule         checkRule
 	parent       parsing.CodeUnit
 	region       parsing.Region
 }
@@ -123,7 +183,7 @@ type checkSetup struct {
 type plannedFile struct {
 	relative   string
 	units      []parsing.CodeUnit
-	applicable []config.Rule
+	applicable []checkRule
 }
 
 // selectedRegion is a region and the size of the unit that holds it.
@@ -253,14 +313,15 @@ func (runner Runner) planEvaluations(
 	files []string,
 	sourceOverlay map[string][]byte,
 ) (Report, []evaluationJob, error) {
-	needCallees := rulesWantCallees(cfg.Rules)
+	compiled := compileRules(cfg.Rules)
+	needCallees := rulesWantCallees(compiled)
 	extracted := make([]plannedFile, 0, len(files))
 	for _, file := range files {
 		if err := ctx.Err(); err != nil {
 			return Report{}, nil, err
 		}
 		planned, err := runner.extractFile(
-			cfg,
+			compiled,
 			root,
 			file,
 			sourceOverlay,
@@ -294,7 +355,7 @@ func (runner Runner) planEvaluations(
 
 // extractFile reads one file and records the rules that apply to it.
 func (runner Runner) extractFile(
-	cfg config.Config,
+	rules []checkRule,
 	root string,
 	file string,
 	sourceOverlay map[string][]byte,
@@ -304,9 +365,9 @@ func (runner Runner) extractFile(
 	if err != nil {
 		return plannedFile{}, err
 	}
-	applicable := make([]config.Rule, 0, len(cfg.Rules))
-	for _, rule := range cfg.Rules {
-		applies, err := scoping.Applies(rule, relative)
+	applicable := make([]checkRule, 0, len(rules))
+	for _, rule := range rules {
+		applies, err := scoping.Applies(rule.rule, relative)
 		if err != nil {
 			return plannedFile{}, err
 		}
@@ -359,9 +420,9 @@ func functionUnits(files []plannedFile) []*parsing.CodeUnit {
 }
 
 // rulesWantCallees reports whether any rule asks for the called functions.
-func rulesWantCallees(rules []config.Rule) bool {
+func rulesWantCallees(rules []checkRule) bool {
 	for _, rule := range rules {
-		if rule.Context.Callees {
+		if rule.rule.Context.Callees {
 			return true
 		}
 	}
@@ -398,16 +459,16 @@ func readOverlayOrFile(
 }
 
 // jobsForUnits builds the work for each code unit and its rules.
-func jobsForUnits(units []parsing.CodeUnit, rules []config.Rule) []evaluationJob {
+func jobsForUnits(units []parsing.CodeUnit, rules []checkRule) []evaluationJob {
 	jobs := make([]evaluationJob, 0, len(units))
 	for _, unit := range units {
-		ordinary := make([]config.Rule, 0, len(rules))
-		enriched := make([]config.Rule, 0, len(rules))
+		ordinary := make([]checkRule, 0, len(rules))
+		enriched := make([]checkRule, 0, len(rules))
 		for _, rule := range rules {
-			if !appliesToKind(rule, unit.Kind) {
+			if !rule.appliesTo(unit.Kind) {
 				continue
 			}
-			if rule.Context.Callees {
+			if rule.rule.Context.Callees {
 				enriched = append(enriched, rule)
 				continue
 			}
@@ -500,18 +561,14 @@ func codeUnitLess(left parsing.CodeUnit, right parsing.CodeUnit) bool {
 }
 
 // requestedRegionKinds returns the region kinds the rules ask for.
-func requestedRegionKinds(rules []config.Rule) map[parsing.CodeKind]parsing.CodeKind {
+func requestedRegionKinds(rules []checkRule) map[parsing.CodeKind]parsing.CodeKind {
 	requested := make(map[parsing.CodeKind]parsing.CodeKind)
 	for _, rule := range rules {
-		for _, kind := range rule.Kinds {
-			parsed, err := parsing.ParseCodeKind(kind.String())
-			if err != nil {
-				continue
-			}
-			switch parsed {
+		for kind := range rule.kinds {
+			switch kind {
 			case parsing.CodeKindComment, parsing.CodeKindDocComment,
 				parsing.CodeKindField, parsing.CodeKindStatement:
-				requested[parsed] = parsed
+				requested[kind] = kind
 			}
 		}
 	}
@@ -538,7 +595,7 @@ func regionCodeUnit(
 		EndColumn:    region.EndColumn,
 		StartByte:    region.StartByte,
 		EndByte:      region.EndByte,
-		RelatedTypes: parent.RelatedTypes,
+		UnitContext:  parsing.UnitContext{RelatedTypes: parent.RelatedTypes},
 	}
 }
 
@@ -553,20 +610,6 @@ func collectOutcomes(
 		pending = append(pending, outcome.findings...)
 	}
 	return pending
-}
-
-// appliesToKind reports whether a rule checks a given kind.
-func appliesToKind(rule config.Rule, kind parsing.CodeKind) bool {
-	if len(rule.Kinds) == 0 {
-		return kind == parsing.CodeKindFunction || kind == parsing.CodeKindType
-	}
-	for _, allowed := range rule.Kinds {
-		parsed, err := parsing.ParseCodeKind(allowed.String())
-		if err == nil && parsed == kind {
-			return true
-		}
-	}
-	return false
 }
 
 // runJobs runs the jobs with the given number of workers and keeps their order.
@@ -652,7 +695,7 @@ func evaluateJob(
 	cfg config.Config,
 ) (evaluationOutcome, error) {
 	results, err := evaluator.Evaluate(ctx, evaluation.Batch{
-		Rules:    job.rules,
+		Rules:    configRules(job.rules),
 		CodeUnit: requestUnit(job),
 	})
 	if err != nil {
@@ -668,11 +711,11 @@ func evaluateJob(
 		findings: make([]pendingFinding, 0),
 	}
 	for _, rule := range job.rules {
-		result, ok := results[rule.ID]
+		result, ok := results[rule.rule.ID]
 		if !ok {
 			return evaluationOutcome{}, fmt.Errorf(
 				"invalid result for rule %q at %s:%d: result is missing",
-				rule.ID,
+				rule.rule.ID,
 				job.unit.Path,
 				job.unit.StartLine,
 			)
@@ -680,7 +723,7 @@ func evaluateJob(
 		if err := result.Validate(); err != nil {
 			return evaluationOutcome{}, fmt.Errorf(
 				"invalid result for rule %q at %s:%d: %w",
-				rule.ID,
+				rule.rule.ID,
 				job.unit.Path,
 				job.unit.StartLine,
 				err,
@@ -689,14 +732,14 @@ func evaluateJob(
 		outcome.evaluations++
 
 		if result.Status != evaluation.StatusFail ||
-			result.Confidence < cfg.ConfidenceFloor(rule) {
+			result.Confidence < cfg.ConfidenceFloor(rule.rule) {
 			continue
 		}
 		outcome.findings = append(outcome.findings, pendingFinding{
 			finding: Finding{
-				RuleID:      rule.ID,
-				Description: rule.Description,
-				Severity:    rule.Severity,
+				RuleID:      rule.rule.ID,
+				Description: rule.rule.Description,
+				Severity:    rule.rule.Severity,
 				Status:      result.Status,
 				Path:        job.unit.Path,
 				Language:    job.unit.Language.String(),
@@ -774,7 +817,7 @@ func localizationJobs(findings []pendingFinding) []localizationJob {
 	jobs := make([]localizationJob, 0)
 	for findingIndex, item := range findings {
 		for _, region := range item.unit.Regions {
-			if !localizesTo(item.rule, region.Category) {
+			if !item.rule.localizesTo(region.Category) {
 				continue
 			}
 			jobs = append(jobs, localizationJob{
@@ -808,29 +851,29 @@ func evaluateLocalizationJob(
 		EndColumn:    job.region.EndColumn,
 		StartByte:    job.region.StartByte,
 		EndByte:      job.region.EndByte,
-		RelatedTypes: job.parent.RelatedTypes,
+		UnitContext:  parsing.UnitContext{RelatedTypes: job.parent.RelatedTypes},
 	}
-	if job.rule.Context.Callees {
+	if job.rule.rule.Context.Callees {
 		candidate.Callees = parsing.ExpandCallees(job.parent.Resolved)
 	}
 	results, err := evaluator.Evaluate(ctx, evaluation.Batch{
-		Rules:    []config.Rule{job.rule},
+		Rules:    []config.Rule{job.rule.rule},
 		CodeUnit: candidate,
 	})
 	if err != nil {
 		return localizationOutcome{}, fmt.Errorf(
 			"localize rule %q at %s:%d: %w",
-			job.rule.ID,
+			job.rule.rule.ID,
 			job.parent.Path,
 			job.region.StartLine,
 			err,
 		)
 	}
-	result, ok := results[job.rule.ID]
+	result, ok := results[job.rule.rule.ID]
 	if !ok {
 		return localizationOutcome{}, fmt.Errorf(
 			"invalid localization result for rule %q at %s:%d: result is missing",
-			job.rule.ID,
+			job.rule.rule.ID,
 			job.parent.Path,
 			job.region.StartLine,
 		)
@@ -838,7 +881,7 @@ func evaluateLocalizationJob(
 	if err := result.Validate(); err != nil {
 		return localizationOutcome{}, fmt.Errorf(
 			"invalid localization result for rule %q at %s:%d: %w",
-			job.rule.ID,
+			job.rule.rule.ID,
 			job.parent.Path,
 			job.region.StartLine,
 			err,
@@ -847,7 +890,7 @@ func evaluateLocalizationJob(
 
 	outcome := localizationOutcome{findingIndex: job.findingIndex}
 	if result.Status == evaluation.StatusFail &&
-		result.Confidence >= cfg.ConfidenceFloor(job.rule) {
+		result.Confidence >= cfg.ConfidenceFloor(job.rule.rule) {
 		outcome.location = &Location{
 			Category:    job.region.Category.String(),
 			Kind:        string(job.region.Kind),
@@ -859,17 +902,6 @@ func evaluateLocalizationJob(
 		}
 	}
 	return outcome, nil
-}
-
-// localizesTo reports whether a rule can point at a given kind of region.
-func localizesTo(rule config.Rule, category parsing.CodeKind) bool {
-	for _, allowed := range rule.Localize {
-		parsed, err := parsing.ParseCodeKind(allowed.String())
-		if err == nil && parsed == category {
-			return true
-		}
-	}
-	return false
 }
 
 // HasFailures reports whether the report has any failures.

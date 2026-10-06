@@ -880,12 +880,12 @@ func testBatch() Batch {
 			Source:    "// Joins users.\nfunc JoinUsers(user User) {}",
 			StartLine: 3,
 			EndLine:   4,
-			RelatedTypes: []parsing.TypeDeclaration{{
+			UnitContext: parsing.UnitContext{RelatedTypes: []parsing.TypeDeclaration{{
 				Name:      "User",
 				Source:    "type User struct{}",
 				StartLine: 1,
 				EndLine:   1,
-			}},
+			}}},
 		},
 	}
 }

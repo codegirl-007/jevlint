@@ -515,20 +515,20 @@ func TestUnitsForRulesDeduplicatesRegionsUsingClosestParent(t *testing.T) {
 	}
 	units := []parsing.CodeUnit{
 		{
-			Kind:      parsing.CodeKindType,
-			Name:      "Service",
-			Source:    "type parent",
-			StartByte: 0,
-			EndByte:   100,
-			Regions:   []parsing.Region{region},
+			Kind:        parsing.CodeKindType,
+			Name:        "Service",
+			Source:      "type parent",
+			StartByte:   0,
+			EndByte:     100,
+			UnitContext: parsing.UnitContext{Regions: []parsing.Region{region}},
 		},
 		{
-			Kind:      parsing.CodeKindFunction,
-			Name:      "Read",
-			Source:    "function parent",
-			StartByte: 20,
-			EndByte:   50,
-			Regions:   []parsing.Region{region},
+			Kind:        parsing.CodeKindFunction,
+			Name:        "Read",
+			Source:      "function parent",
+			StartByte:   20,
+			EndByte:     50,
+			UnitContext: parsing.UnitContext{Regions: []parsing.Region{region}},
 		},
 	}
 	rules := []config.Rule{{Kinds: []config.TargetKind{config.TargetKindComment}}}
@@ -556,7 +556,7 @@ func expandUnitsForRules(
 	units []parsing.CodeUnit,
 	rules []config.Rule,
 ) []parsing.CodeUnit {
-	requested := requestedRegionKinds(rules)
+	requested := requestedRegionKinds(compileRules(rules))
 	if len(requested) == 0 {
 		return units
 	}
@@ -857,16 +857,15 @@ func TestCheckLocalizesFailedRuleToTreeSitterRegion(t *testing.T) {
 func TestLocalizesToRequiresExplicitCategory(t *testing.T) {
 	t.Parallel()
 
-	if localizesTo(config.Rule{}, parsing.CodeKindStatement) {
+	if compileRules([]config.Rule{{}})[0].localizesTo(parsing.CodeKindStatement) {
 		t.Fatal("omitted localization should skip the second pass")
 	}
-	if localizesTo(config.Rule{Localize: []config.TargetKind{}}, parsing.CodeKindStatement) {
+	if compileRules([]config.Rule{{Localize: []config.TargetKind{}}})[0].localizesTo(parsing.CodeKindStatement) {
 		t.Fatal("empty localization should skip the second pass")
 	}
-	if !localizesTo(
-		config.Rule{Localize: []config.TargetKind{config.TargetKindStatement}},
-		parsing.CodeKindStatement,
-	) {
+	if !compileRules([]config.Rule{
+		{Localize: []config.TargetKind{config.TargetKindStatement}},
+	})[0].localizesTo(parsing.CodeKindStatement) {
 		t.Fatal("explicit statement localization should run the second pass")
 	}
 }

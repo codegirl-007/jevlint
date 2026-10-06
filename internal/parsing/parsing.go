@@ -12,28 +12,38 @@ import (
 
 // CodeUnit is one function or type read from a source file.
 type CodeUnit struct {
-	Kind         CodeKind          `json:"kind"`
-	Name         string            `json:"name"`
-	Language     SourceLanguage    `json:"language"`
-	Path         string            `json:"path"`
-	Source       string            `json:"source"`
-	ParentSource string            `json:"parentSource,omitempty"`
-	RegionKind   NodeKind          `json:"regionKind,omitempty"`
-	StartLine    uint              `json:"startLine"`
-	EndLine      uint              `json:"endLine"`
-	StartColumn  uint              `json:"startColumn"`
-	EndColumn    uint              `json:"endColumn"`
-	StartByte    uint              `json:"startByte"`
-	EndByte      uint              `json:"endByte"`
+	Kind         CodeKind       `json:"kind"`
+	Name         string         `json:"name"`
+	Language     SourceLanguage `json:"language"`
+	Path         string         `json:"path"`
+	Source       string         `json:"source"`
+	ParentSource string         `json:"parentSource,omitempty"`
+	RegionKind   NodeKind       `json:"regionKind,omitempty"`
+	StartLine    uint           `json:"startLine"`
+	EndLine      uint           `json:"endLine"`
+	StartColumn  uint           `json:"startColumn"`
+	EndColumn    uint           `json:"endColumn"`
+	StartByte    uint           `json:"startByte"`
+	EndByte      uint           `json:"endByte"`
+
+	// UnitContext carries the optional material attached to a unit by later
+	// stages rather than the parsed declaration itself.
+	UnitContext
+
+	// docStart is where the declaration itself starts, after any leading
+	// comment. It is zero for units that are not functions or types.
+	docStart uint
+}
+
+// UnitContext is the optional processing context attached to a code unit.
+type UnitContext struct {
+	// RelatedTypes are types a function appears to mention. The association is
+	// a best-effort syntactic hint, not a resolved type binding.
 	RelatedTypes []TypeDeclaration `json:"types,omitempty"`
 	Callees      []CalleeContext   `json:"callees,omitempty"`
 	CallRefs     []CallRef         `json:"-"`
 	Resolved     []CalleeContext   `json:"-"`
 	Regions      []Region          `json:"-"`
-
-	// docStart is where the declaration itself starts, after any leading
-	// comment. It is zero for units that are not functions or types.
-	docStart uint
 }
 
 // CodeKind names the kind of a code unit.
@@ -318,7 +328,7 @@ func (extractor *Extractor) Extract(path string, source []byte) ([]CodeUnit, err
 		CodeKindType,
 	)
 	declarations := extractTypeDeclarations(spec, path, source, root, types)
-	attachRelatedTypes(functions, declarations)
+	attachMentionedTypes(functions, declarations)
 
 	units := append(functions, types...)
 	regions := extractRegions(root, source, spec.regionKinds)
@@ -419,8 +429,11 @@ func extractTypeDeclarations(
 	return declarations
 }
 
-// attachRelatedTypes adds the types that a function mentions.
-func attachRelatedTypes(functions []CodeUnit, declarations []TypeDeclaration) {
+// attachMentionedTypes records a best-effort hint of the types a function
+// mentions. The match is syntactic: a type that lexically encloses the unit or
+// whose name appears as a whole word. It is optional context, not a resolved
+// type binding, so a wrong hint only weakens the context sent with the unit.
+func attachMentionedTypes(functions []CodeUnit, declarations []TypeDeclaration) {
 	for index := range functions {
 		for _, declaration := range declarations {
 			if declarationContains(declaration, functions[index]) ||
