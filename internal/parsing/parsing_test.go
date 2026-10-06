@@ -647,6 +647,103 @@ func TestExtractSeparatesDocCommentsFromRegularComments(t *testing.T) {
 	}
 }
 
+func TestExtractExportedDeclarationDocComment(t *testing.T) {
+	t.Parallel()
+
+	source := "/** Describes alpha. */\n" +
+		"export function alpha(): number {\n" +
+		"  return 1\n" +
+		"}\n\n" +
+		"/** Describes Shape. */\n" +
+		"export interface Shape {\n" +
+		"  width: number\n" +
+		"}\n"
+	units, err := testExtractorForPath(t, "sample.ts").Extract("sample.ts", []byte(source))
+	if err != nil {
+		t.Fatalf("Extract() error = %v", err)
+	}
+
+	for _, want := range []struct {
+		kind CodeKind
+		name string
+		doc  string
+	}{
+		{CodeKindFunction, "alpha", "/** Describes alpha. */"},
+		{CodeKindType, "Shape", "/** Describes Shape. */"},
+	} {
+		unit := findUnit(units, want.kind, want.name)
+		if unit == nil {
+			t.Fatalf("%s %q not found in %#v", want.kind, want.name, units)
+		}
+		if !strings.HasPrefix(unit.Source, want.doc) {
+			t.Fatalf("exported %s source = %q, want leading %q", want.name, unit.Source, want.doc)
+		}
+		var docs int
+		for _, region := range unit.Regions {
+			if region.Category == CodeKindDocComment {
+				docs++
+			}
+		}
+		if docs != 1 {
+			t.Fatalf("exported %s doc regions = %#v, want one docComment", want.name, unit.Regions)
+		}
+	}
+}
+
+func TestExtractStandaloneCommentUnits(t *testing.T) {
+	t.Parallel()
+
+	source := "/** File header. */\n" +
+		"\n" +
+		"// Tool names.\n" +
+		"export const NAMES = new Set([\"edit\"])\n" +
+		"\n" +
+		"export function beta(): number {\n" +
+		"  // Return one.\n" +
+		"  return 1\n" +
+		"}\n"
+	units, err := testExtractorForPath(t, "sample.ts").Extract("sample.ts", []byte(source))
+	if err != nil {
+		t.Fatalf("Extract() error = %v", err)
+	}
+
+	// The file header is separated from the next comment by a blank line: plain comment.
+	header := findUnit(units, CodeKindComment, "sample.ts:1")
+	if header == nil {
+		t.Fatalf("file header comment unit not found in %#v", units)
+	}
+	if header.Source != "/** File header. */" {
+		t.Fatalf("header source = %q", header.Source)
+	}
+
+	// The comment directly above the const reads as its doc comment.
+	constComment := findUnit(units, CodeKindDocComment, "sample.ts:3")
+	if constComment == nil {
+		t.Fatalf("const comment unit not found in %#v", units)
+	}
+	if constComment.Source != "// Tool names." {
+		t.Fatalf("const comment source = %q", constComment.Source)
+	}
+
+	// A comment inside a function stays attached to that function, not standalone.
+	if findUnit(units, CodeKindComment, "sample.ts:7") != nil {
+		t.Fatalf("in-function comment was emitted as a standalone unit")
+	}
+	beta := findUnit(units, CodeKindFunction, "beta")
+	if beta == nil {
+		t.Fatal("function beta not found")
+	}
+	var inner int
+	for _, region := range beta.Regions {
+		if region.Category == CodeKindComment {
+			inner++
+		}
+	}
+	if inner != 1 {
+		t.Fatalf("beta comment regions = %#v, want one comment", beta.Regions)
+	}
+}
+
 func TestNewLanguagePresetsCategorizeRegions(t *testing.T) {
 	t.Parallel()
 
