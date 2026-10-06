@@ -278,6 +278,9 @@ Evidence is sent to the service in the code unit's `evidence` field and is also
 written onto findings under `evidence`, so an output consumer can see exactly
 what repository context Jevlint supplied without asking Jev to produce
 provenance. Every relationship is one `evidence` item tagged with its `kind`.
+The question tells the model to judge `state.source` and to treat
+`state.evidence` (and `state.parentSource`) as background, not as the code
+under review.
 
 ## How it works
 

@@ -159,6 +159,35 @@ func TestTypeSafeEvaluateExplainsRegionContext(t *testing.T) {
 	}
 }
 
+func TestTypeSafeEvaluateExplainsEvidenceContext(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		var payload systemOneRequest
+		if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
+			t.Errorf("decode request: %v", err)
+		}
+		instructions := payload.Questions["database-joins"].Instructions
+		if !strings.Contains(instructions, "state.source") ||
+			!strings.Contains(instructions, "state.evidence") {
+			t.Errorf("instructions = %q", instructions)
+		}
+		fmt.Fprint(writer, `{
+			"answers": {
+				"database-joins": {"type": "choice", "choice": "pass", "confidence": 1}
+			}
+		}`)
+	}))
+	defer server.Close()
+
+	client := newTestClient(t, server, nil)
+	batch := testBatch()
+	batch.Rules = batch.Rules[:1]
+	if _, err := client.Evaluate(context.Background(), batch); err != nil {
+		t.Fatalf("Evaluate() error = %v", err)
+	}
+}
+
 func TestTypeSafeCacheKeyTracksExactEvaluationInput(t *testing.T) {
 	t.Parallel()
 

@@ -469,7 +469,7 @@ func questionsForBatch(batch Batch) (map[string]question, error) {
 		}
 		questions[rule.ID] = question{
 			Type:         questionTypeChoice,
-			Instructions: instructionsFor(rule, batch.CodeUnit),
+			Instructions: instructionsFor(rule, batch.CodeUnit, len(batch.Evidence) > 0),
 			Criteria:     criteriaFor(rule),
 		}
 	}
@@ -663,15 +663,31 @@ func readResponse(response *http.Response) ([]byte, error) {
 func instructionsFor(
 	rule config.Rule,
 	unit parsing.CodeUnit,
+	hasEvidence bool,
 ) string {
 	var builder strings.Builder
-	if unit.ParentSource != "" {
+	switch {
+	case unit.ParentSource != "" && hasEvidence:
 		builder.WriteString(
-			"Determine whether state.source violates this rule. " +
-				"Use state.parentSource only as surrounding context:\n",
+			"Judge only the code in `state.source`. The declaration it sits in " +
+				"(`state.parentSource`) and the related code (`state.evidence`) are " +
+				"background that can help you understand it; they are not what you " +
+				"are judging:\n",
 		)
-	} else {
-		builder.WriteString("Determine whether the supplied code complies with this rule:\n")
+	case unit.ParentSource != "":
+		builder.WriteString(
+			"Judge only the code in `state.source`. The declaration it sits in " +
+				"(`state.parentSource`) is background that can help you understand " +
+				"it; it is not what you are judging:\n",
+		)
+	case hasEvidence:
+		builder.WriteString(
+			"Judge only the code in `state.source`. The related code in " +
+				"`state.evidence` is background that can help you understand it; it " +
+				"is not what you are judging:\n",
+		)
+	default:
+		builder.WriteString("Judge only the code in `state.source`:\n")
 	}
 	builder.WriteString(rule.Description)
 	if len(rule.Exceptions) > 0 {
