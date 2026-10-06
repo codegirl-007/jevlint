@@ -816,6 +816,43 @@ func TestTypeSafeDebugLogRedactsCredential(t *testing.T) {
 	}
 }
 
+func TestDebugLogCapsLargeRequestPayload(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(writer, `{"answers":{"database-joins":{"type":"choice","choice":"pass","confidence":1}}}`)
+	}))
+	defer server.Close()
+
+	var logs strings.Builder
+	client, err := NewClient(Options{
+		APIKey:     "sk-test",
+		BaseURL:    ServiceURL(server.URL),
+		HTTPClient: server.Client(),
+		Logf: func(format string, args ...any) {
+			fmt.Fprintf(&logs, format+"\n", args...)
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+
+	batch := testBatch()
+	batch.Rules = batch.Rules[:1]
+	batch.CodeUnit.Source = strings.Repeat("x", maxDebugBodyBytes*2)
+	if _, err := client.Evaluate(context.Background(), batch); err != nil {
+		t.Fatalf("Evaluate() error = %v", err)
+	}
+
+	out := logs.String()
+	if !strings.Contains(out, "truncated") {
+		t.Fatalf("large request payload was not capped")
+	}
+	if strings.Contains(out, strings.Repeat("x", maxDebugBodyBytes+1)) {
+		t.Fatalf("log contained the uncapped payload")
+	}
+}
+
 func newTestClient(
 	t *testing.T,
 	server *httptest.Server,

@@ -48,21 +48,25 @@ type RepositoryIndex struct {
 	contained map[SymbolID]SymbolID
 	related   map[SymbolID][]parsing.TypeDeclaration
 	imports   map[string][]parsing.Import
+	// modulePath is the Go module path (from go.mod), used to decide whether a
+	// non-relative import names code in this repository.
+	modulePath string
 }
 
 // New builds an index from the extracted files.
-func New(files []parsing.FileExtraction) *RepositoryIndex {
+func New(files []parsing.FileExtraction, modulePath string) *RepositoryIndex {
 	index := &RepositoryIndex{
-		symbols:   make(map[SymbolID]Symbol),
-		byName:    make(map[string][]SymbolID),
-		byDir:     make(map[string][]SymbolID),
-		files:     make(map[string][]SymbolID),
-		calls:     make(map[SymbolID][]SymbolID),
-		callRefs:  make(map[SymbolID][]parsing.CallRef),
-		callers:   make(map[SymbolID][]SymbolID),
-		contained: make(map[SymbolID]SymbolID),
-		related:   make(map[SymbolID][]parsing.TypeDeclaration),
-		imports:   make(map[string][]parsing.Import),
+		modulePath: modulePath,
+		symbols:    make(map[SymbolID]Symbol),
+		byName:     make(map[string][]SymbolID),
+		byDir:      make(map[string][]SymbolID),
+		files:      make(map[string][]SymbolID),
+		calls:      make(map[SymbolID][]SymbolID),
+		callRefs:   make(map[SymbolID][]parsing.CallRef),
+		callers:    make(map[SymbolID][]SymbolID),
+		contained:  make(map[SymbolID]SymbolID),
+		related:    make(map[SymbolID][]parsing.TypeDeclaration),
+		imports:    make(map[string][]parsing.Import),
 	}
 	index.addSymbols(files)
 	index.addImports(files)
@@ -166,7 +170,7 @@ func (index *RepositoryIndex) uniqueTypeNamed(path string, name string) (SymbolI
 // goReceiverType reads the receiver type name from a Go method's source. It
 // returns false for anything that is not a plain `func (recv Type)` form.
 func goReceiverType(source string) (string, bool) {
-	trimmed := strings.TrimLeft(source, " \t\r\n")
+	trimmed := strings.TrimLeft(stripLeadingComments(source), " \t\r\n")
 	const prefix = "func ("
 	if !strings.HasPrefix(trimmed, prefix) {
 		return "", false
@@ -192,6 +196,31 @@ func goReceiverType(source string) (string, bool) {
 		return "", false
 	}
 	return receiver, true
+}
+
+// stripLeadingComments removes the line or block comment a declaration's source
+// can begin with, so a method's receiver can be read from its `func` line.
+func stripLeadingComments(source string) string {
+	rest := source
+	for {
+		rest = strings.TrimLeft(rest, " \t\r\n")
+		switch {
+		case strings.HasPrefix(rest, "//"):
+			newline := strings.IndexByte(rest, '\n')
+			if newline < 0 {
+				return ""
+			}
+			rest = rest[newline+1:]
+		case strings.HasPrefix(rest, "/*"):
+			end := strings.Index(rest, "*/")
+			if end < 0 {
+				return ""
+			}
+			rest = rest[end+2:]
+		default:
+			return rest
+		}
+	}
 }
 
 // smallestTypeContaining returns the smallest type symbol that contains a unit.
@@ -342,24 +371,32 @@ func (index *RepositoryIndex) resolveQualified(
 }
 
 // importDirectories maps an import path to the directories it could name. A
-// relative path resolves against the importing file; a module path matches the
-// longest repository directory it ends with.
+// relative path resolves against the importing file; a non-relative path only
+// resolves when it is inside the repository's module.
 func (index *RepositoryIndex) importDirectories(callerPath, importPath string) []string {
 	if strings.HasPrefix(importPath, ".") {
 		return []string{path.Clean(path.Join(path.Dir(callerPath), importPath))}
 	}
-	best := ""
-	for dir := range index.byDir {
-		if dir == importPath || strings.HasSuffix(importPath, "/"+dir) {
-			if len(dir) > len(best) {
-				best = dir
-			}
-		}
-	}
-	if best == "" {
+	// A module import can only name code in this repository when it sits inside
+	// the repository's module. Without a known module path, refuse to guess:
+	// suffix matching would let an unrelated module such as
+	// "github.com/other/project/internal/auth" bind to a local internal/auth.
+	if index.modulePath == "" {
 		return nil
 	}
-	return []string{best}
+	dir := ""
+	switch {
+	case importPath == index.modulePath:
+		dir = "."
+	case strings.HasPrefix(importPath, index.modulePath+"/"):
+		dir = strings.TrimPrefix(importPath, index.modulePath+"/")
+	default:
+		return nil
+	}
+	if _, ok := index.byDir[dir]; !ok {
+		return nil
+	}
+	return []string{dir}
 }
 
 // addRelated links each function to the type declarations it mentions, using

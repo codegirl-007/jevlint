@@ -1,6 +1,8 @@
 package repository
 
 import (
+	"strings"
+
 	"github.com/codegirl-007/jevlint/internal/evidence"
 	"github.com/codegirl-007/jevlint/internal/parsing"
 )
@@ -143,13 +145,10 @@ func (index *RepositoryIndex) importEvidence(symbol Symbol) []evidence.Evidence 
 		return nil
 	}
 	refs := index.callRefs[symbol.ID]
-	if len(refs) == 0 {
-		return nil
-	}
 	items := make([]evidence.Evidence, 0)
 	seen := make(map[uint]struct{})
 	for _, imported := range imports {
-		if !index.importReferenced(imported, refs, symbol.Path) {
+		if !index.importReferenced(imported, refs, symbol.Source, symbol.Path) {
 			continue
 		}
 		if _, exists := seen[imported.StartByte]; exists {
@@ -170,14 +169,20 @@ func (index *RepositoryIndex) importEvidence(symbol Symbol) []evidence.Evidence 
 	return items
 }
 
-// importReferenced reports whether a call references an import's local name.
+// importReferenced reports whether a unit references an import's local name,
+// either as a qualifier anywhere in its source (a call or a type position) or
+// as an unqualified call whose name matches the alias.
 func (index *RepositoryIndex) importReferenced(
 	imported parsing.Import,
 	refs []parsing.CallRef,
+	source string,
 	file string,
 ) bool {
 	if imported.Alias == "" {
 		return false
+	}
+	if qualifiedUse(source, imported.Alias) {
+		return true
 	}
 	for _, ref := range refs {
 		if ref.Path != "" {
@@ -200,6 +205,24 @@ func (index *RepositoryIndex) importReferenced(
 		if !shadowed {
 			return true
 		}
+	}
+	return false
+}
+
+// qualifiedUse reports whether source uses an import alias as a qualifier, e.g.
+// `context.Context` in a parameter type or `sql.Open` in a call.
+func qualifiedUse(source, alias string) bool {
+	needle := alias + "."
+	for offset := 0; offset < len(source); {
+		found := strings.Index(source[offset:], needle)
+		if found < 0 {
+			return false
+		}
+		found += offset
+		if found == 0 || !isIdentifierByte(source[found-1]) {
+			return true
+		}
+		offset = found + 1
 	}
 	return false
 }

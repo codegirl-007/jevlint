@@ -566,7 +566,7 @@ func (client *Client) cacheKey(body []byte) string {
 
 // perform sends a request and retries when the service asks for it.
 func (client *Client) perform(ctx context.Context, body []byte) ([]byte, error) {
-	client.debugf("jevlint: payload to jev: %s", string(body))
+	client.debugf("jevlint: payload to jev: %s", debugBody(body))
 	for attempt := 0; ; attempt++ {
 		request, err := client.newRequest(ctx, body, attempt)
 		if err != nil {

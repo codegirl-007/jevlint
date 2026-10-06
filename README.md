@@ -94,7 +94,7 @@ export TYPESAFE_API_KEY=apikey_...
 - **Keep it secret:** export the key from your shell profile or a secret
   manager. Jevlint never writes credentials into the project.
 - **Debugging:** set `JEVLINT_DEBUG=1` to print each request URL, the
-  credential kind (never the value), the pretty-printed request payload, and
+  credential kind (never the value), the request payload (capped for size), and
   the response to stderr. Search it with `less`: redirect stderr to a file and
   look for `payload to jev`.
 
@@ -246,13 +246,15 @@ customize a preset, but it cannot load an arbitrary external grammar.
 - `context`: deterministic repository evidence to include as extra state. The
   evidence is gathered from a repository-wide index built once per run, and
   every item carries file, line, and source provenance. Rules with the same
-  context are batched together; a unit with both plain and context rules sends
-  one request per distinct context.
+  context are batched together, but each distinct context is a separate request:
+  a unit checked by rules with N different `context` settings is sent up to N
+  times.
   - `context.callees`: functions this unit directly calls.
   - `context.callers`: functions that directly call this unit (one hop).
   - `context.relatedTypes`: directly related type declarations and, for a
     method, its containing type.
-  - `context.imports`: imports the unit references.
+  - `context.imports`: imports the unit uses as a qualifier, in a call or a type
+    position.
 
 ```json
 {
@@ -323,6 +325,13 @@ The repository ships its own cases in `jevlint-evals.json` covering the
 fixtures under `examples/rules`. Folder names such as `good` and `bad` are
 organizational only; the case's `expect` value decides the outcome. A rule can
 have many cases, including several for the same language.
+
+`examples/context-evals/` is a separate area for measuring one rule across
+`context` variants. It keeps its own `jevlint-evals.json` (next to the variant
+configs, since `--evals` defaults to the `--config` directory) and points at
+fixtures under `examples/rules/function-name-behavior-mismatch/context/`. Run it
+with `examples/context-evals/run.sh` or, for one variant,
+`jevlint eval --config examples/context-evals/callees.json`.
 
 ```json
 {

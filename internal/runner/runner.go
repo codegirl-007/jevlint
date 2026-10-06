@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 
 	"github.com/codegirl-007/jevlint/internal/config"
@@ -286,7 +287,7 @@ func (runner Runner) planEvaluations(
 		extracted = append(extracted, planned)
 		extractions = append(extractions, planned.extraction)
 	}
-	index := repository.New(extractions)
+	index := repository.New(extractions, modulePath(root))
 
 	report := Report{Findings: make([]Finding, 0)}
 	jobs := make([]evaluationJob, 0)
@@ -408,6 +409,23 @@ func readOverlayOrFile(
 		return nil, fmt.Errorf("read %q: %w", relative, err)
 	}
 	return source, nil
+}
+
+// modulePath returns the Go module path declared in the repository's go.mod,
+// or "" when there is none. It decides whether a non-relative import can name
+// code in this repository.
+func modulePath(root string) string {
+	data, err := os.ReadFile(filepath.Join(root, "go.mod"))
+	if err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 2 && fields[0] == "module" {
+			return fields[1]
+		}
+	}
+	return ""
 }
 
 // jobsForUnits builds the work for each code unit, grouping rules by the

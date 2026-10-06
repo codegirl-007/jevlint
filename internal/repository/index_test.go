@@ -37,7 +37,7 @@ func buildIndex(t *testing.T, files []sourceFile) (*RepositoryIndex, []parsing.F
 		}
 		extractions = append(extractions, extracted)
 	}
-	return New(extractions), extractions
+	return New(extractions, "example.com/app"), extractions
 }
 
 func functionUnit(t *testing.T, files []parsing.FileExtraction, name string) parsing.CodeUnit {
@@ -260,6 +260,57 @@ func TestAmbiguousImportedQualifiedCallStaysUnresolved(t *testing.T) {
 		evidence.KindCallee,
 	); len(got) != 0 {
 		t.Fatalf("callees = %#v, want none", got)
+	}
+}
+
+func TestExternalModuleImportStaysUnresolved(t *testing.T) {
+	t.Parallel()
+
+	// The external path ends with the local directory "internal/auth", but it is
+	// not inside this repository's module, so it must not bind to local code.
+	index, files := buildIndex(t, []sourceFile{
+		{"internal/auth/auth.go", "package auth\nfunc Validate() {}\n"},
+		{"cmd/main.go", "package main\nimport \"github.com/other/project/internal/auth\"\nfunc run() { auth.Validate() }\n"},
+	})
+	run := functionUnit(t, files, "run")
+	if got := evidenceNames(
+		index.EvidenceFor(run, evidence.Request{Callees: true}),
+		evidence.KindCallee,
+	); len(got) != 0 {
+		t.Fatalf("external import resolved to local code: %#v", got)
+	}
+}
+
+func TestDocumentedGoMethodKeepsContainingType(t *testing.T) {
+	t.Parallel()
+
+	for _, receiver := range []string{"User", "*User"} {
+		index, files := buildIndex(t, []sourceFile{
+			{"user.go",
+				"package s\ntype User struct{}\n\n// Save persists the user.\nfunc (u " + receiver + ") Save() {}\n"},
+		})
+		save := functionUnit(t, files, "Save")
+		if got := evidenceNames(
+			index.EvidenceFor(save, evidence.Request{RelatedTypes: true}),
+			evidence.KindContainingType,
+		); !reflect.DeepEqual(got, []string{"User"}) {
+			t.Fatalf("receiver %q: containing type = %#v, want [User]", receiver, got)
+		}
+	}
+}
+
+func TestImportEvidenceFromTypePosition(t *testing.T) {
+	t.Parallel()
+
+	index, files := buildIndex(t, []sourceFile{
+		{"a.go", "package s\nimport \"context\"\nfunc Handle(ctx context.Context) {}\n"},
+	})
+	handle := functionUnit(t, files, "Handle")
+	if got := evidenceNames(
+		index.EvidenceFor(handle, evidence.Request{Imports: true}),
+		evidence.KindImport,
+	); !reflect.DeepEqual(got, []string{"context"}) {
+		t.Fatalf("imports = %#v, want [context]", got)
 	}
 }
 

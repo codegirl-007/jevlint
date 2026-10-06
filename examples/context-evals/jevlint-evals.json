@@ -3,12 +3,12 @@
   "cases": [
     {
       "rule": "function-name-behavior-mismatch",
-      "file": "fixtures/mismatch/bad/example.go",
+      "file": "../rules/function-name-behavior-mismatch/context/bad/example.go",
       "expect": "fail"
     },
     {
       "rule": "function-name-behavior-mismatch",
-      "file": "fixtures/mismatch/good/example.go",
+      "file": "../rules/function-name-behavior-mismatch/context/good/example.go",
       "expect": "pass"
     }
   ]
