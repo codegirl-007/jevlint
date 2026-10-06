@@ -326,13 +326,6 @@ fixtures under `examples/rules`. Folder names such as `good` and `bad` are
 organizational only; the case's `expect` value decides the outcome. A rule can
 have many cases, including several for the same language.
 
-`examples/context-evals/` is a separate area for measuring one rule across
-`context` variants. It keeps its own `jevlint-evals.json` (next to the variant
-configs, since `--evals` defaults to the `--config` directory) and points at
-fixtures under `examples/rules/function-name-behavior-mismatch/context/`. Run it
-with `examples/context-evals/run.sh` or, for one variant,
-`jevlint eval --config examples/context-evals/callees.json`.
-
 ```json
 {
   "version": 1,
