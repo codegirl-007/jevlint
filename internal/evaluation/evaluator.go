@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/codegirl-007/jevlint/internal/config"
+	"github.com/codegirl-007/jevlint/internal/evidence"
 	"github.com/codegirl-007/jevlint/internal/parsing"
 )
 
@@ -20,10 +21,12 @@ const (
 	StatusAbstain
 )
 
-// Batch is one piece of code and the rules to check against it.
+// Batch is one piece of code, the rules to check against it, and the
+// deterministic repository evidence gathered for it.
 type Batch struct {
-	Rules    []config.Rule    `json:"rules"`
-	CodeUnit parsing.CodeUnit `json:"codeUnit"`
+	Rules    []config.Rule       `json:"rules"`
+	CodeUnit parsing.CodeUnit    `json:"codeUnit"`
+	Evidence []evidence.Evidence `json:"evidence,omitempty"`
 }
 
 // Result is the answer and confidence for one rule.

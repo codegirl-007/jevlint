@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/codegirl-007/jevlint/internal/config"
+	"github.com/codegirl-007/jevlint/internal/evidence"
 	"github.com/codegirl-007/jevlint/internal/parsing"
 )
 
@@ -64,9 +65,9 @@ func TestTypeSafeEvaluateBatchesRules(t *testing.T) {
 			if !strings.HasPrefix(source, "// Joins users.") {
 				t.Errorf("state source = %q", source)
 			}
-			types, ok := state["types"].([]any)
-			if !ok || len(types) != 1 {
-				t.Errorf("state types = %#v", state["types"])
+			evidenceItems, ok := state["evidence"].([]any)
+			if !ok || len(evidenceItems) != 2 {
+				t.Errorf("state evidence = %#v", state["evidence"])
 			}
 			for _, key := range []string{
 				"startLine", "endLine", "startColumn", "endColumn", "startByte", "endByte",
@@ -211,9 +212,6 @@ func TestTypeSafeCacheKeyTracksExactEvaluationInput(t *testing.T) {
 	locationOnly.CodeUnit.EndLine++
 	locationOnly.CodeUnit.StartColumn++
 	locationOnly.CodeUnit.StartByte++
-	if locationOnly.CodeUnit.RelatedTypes != nil {
-		locationOnly.CodeUnit.RelatedTypes[0].StartLine++
-	}
 	locationBody, err := client.requestBody(locationOnly)
 	if err != nil {
 		t.Fatalf("requestBody() error = %v", err)
@@ -227,7 +225,7 @@ func TestTypeSafeCacheKeyTracksExactEvaluationInput(t *testing.T) {
 			batch.CodeUnit.Path = "other.go"
 		},
 		"related type": func(batch *Batch) {
-			batch.CodeUnit.RelatedTypes[0].Source = "type User struct{ ID int }"
+			batch.Evidence[0].Source = "type User struct{ ID int }"
 		},
 		"rule description": func(batch *Batch) {
 			batch.Rules[0].Description = "A different rule."
@@ -249,13 +247,14 @@ func TestTypeSafeCacheKeyTracksExactEvaluationInput(t *testing.T) {
 			batch.Rules[0].AllowAbstain = true
 		},
 		"callee context": func(batch *Batch) {
-			batch.CodeUnit.Callees = []parsing.CalleeContext{{
-				Name:      "loadUsers",
+			batch.Evidence = append(batch.Evidence, evidence.Evidence{
+				Kind:      evidence.KindCallee,
 				Path:      "users.go",
-				Source:    "func loadUsers() {}",
 				StartLine: 20,
 				EndLine:   20,
-			}}
+				Symbol:    "loadUsers",
+				Source:    "func loadUsers() {}",
+			})
 		},
 	}
 	for name, mutate := range mutations {
@@ -804,7 +803,7 @@ func TestTypeSafeDebugLogRedactsCredential(t *testing.T) {
 	out := logs.String()
 	for _, want := range []string{
 		"jevlint: request POST ",
-		"jevlint: request body:",
+		"jevlint: payload to jev:",
 		"jevlint: response 200",
 		"Authorization=Bearer <redacted>",
 	} {
@@ -880,12 +879,24 @@ func testBatch() Batch {
 			Source:    "// Joins users.\nfunc JoinUsers(user User) {}",
 			StartLine: 3,
 			EndLine:   4,
-			RelatedTypes: []parsing.TypeDeclaration{{
-				Name:      "User",
-				Source:    "type User struct{}",
+		},
+		Evidence: []evidence.Evidence{
+			{
+				Kind:      evidence.KindRelatedType,
+				Path:      "store.go",
 				StartLine: 1,
 				EndLine:   1,
-			}},
+				Symbol:    "User",
+				Source:    "type User struct{}",
+			},
+			{
+				Kind:      evidence.KindCallee,
+				Path:      "users.go",
+				StartLine: 20,
+				EndLine:   20,
+				Symbol:    "loadUsers",
+				Source:    "func loadUsers() {}",
+			},
 		},
 	}
 }

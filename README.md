@@ -94,8 +94,9 @@ export TYPESAFE_API_KEY=apikey_...
 - **Keep it secret:** export the key from your shell profile or a secret
   manager. Jevlint never writes credentials into the project.
 - **Debugging:** set `JEVLINT_DEBUG=1` to print each request URL, the
-  credential kind (never the value), the request body, and the response to
-  stderr.
+  credential kind (never the value), the pretty-printed request payload, and
+  the response to stderr. Search it with `less`: redirect stderr to a file and
+  look for `payload to jev`.
 
 ### Providers
 
@@ -242,11 +243,16 @@ customize a preset, but it cannot load an arbitrary external grammar.
   Skip is not a finding.
 - `allowAbstain`: let Jev answer `abstain` when the rule applies but there is
   not enough context to decide. Abstain is not a finding.
-- `context.callees`: include confidently resolved direct project-local callees
-  as extra state. Depth is 1 and bounded (12 callees, about 16 KiB of source).
-  Ambiguous and external calls are ignored. Useful when the target function
-  alone does not contain enough evidence. When mixed with ordinary rules on the
-  same unit, Jevlint sends a second request.
+- `context`: deterministic repository evidence to include as extra state. The
+  evidence is gathered from a repository-wide index built once per run, and
+  every item carries file, line, and source provenance. Rules with the same
+  context are batched together; a unit with both plain and context rules sends
+  one request per distinct context.
+  - `context.callees`: functions this unit directly calls.
+  - `context.callers`: functions that directly call this unit (one hop).
+  - `context.relatedTypes`: directly related type declarations and, for a
+    method, its containing type.
+  - `context.imports`: imports the unit references.
 
 ```json
 {
@@ -258,6 +264,18 @@ customize a preset, but it cannot load an arbitrary external grammar.
   }
 }
 ```
+
+Context is conservative: when a relationship cannot be resolved, it is omitted
+rather than guessed. Calls resolve to a same-file unique function, a
+project-unique function, or a function in a package named by an unambiguous
+import alias. Ambiguous names, receiver-typed calls, external packages, and
+generic references are left out. The `relatedTypes` behavior is opt-in, so add
+`"relatedTypes": true` to keep the type context earlier versions always sent.
+
+Evidence is sent to the service in the code unit's `evidence` field and is also
+written onto findings under `evidence`, so an output consumer can see exactly
+what repository context Jevlint supplied without asking Jev to produce
+provenance. Every relationship is one `evidence` item tagged with its `kind`.
 
 ## How it works
 

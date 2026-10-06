@@ -54,7 +54,10 @@ type Rule struct {
 
 // RuleContext asks for extra material to send with a rule.
 type RuleContext struct {
-	Callees bool `json:"callees,omitempty"`
+	Callees      bool `json:"callees,omitempty"`
+	Callers      bool `json:"callers,omitempty"`
+	RelatedTypes bool `json:"relatedTypes,omitempty"`
+	Imports      bool `json:"imports,omitempty"`
 }
 
 // TargetKind names the kind of code a rule can check.

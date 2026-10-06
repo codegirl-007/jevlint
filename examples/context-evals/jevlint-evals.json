@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "cases": [
+    {
+      "rule": "function-name-behavior-mismatch",
+      "file": "fixtures/mismatch/bad/example.go",
+      "expect": "fail"
+    },
+    {
+      "rule": "function-name-behavior-mismatch",
+      "file": "fixtures/mismatch/good/example.go",
+      "expect": "pass"
+    }
+  ]
+}
