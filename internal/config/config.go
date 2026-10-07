@@ -29,11 +29,12 @@ type PackRef struct {
 
 // Language customizes a built in language preset.
 type Language struct {
-	Extensions         []string            `json:"extensions,omitempty"`
-	FunctionQueries    []string            `json:"functionQueries,omitempty"`
-	TypeQueries        []string            `json:"typeQueries,omitempty"`
-	TypeContextQueries []string            `json:"typeContextQueries,omitempty"`
-	Regions            map[string][]string `json:"regions,omitempty"`
+	Extensions            []string            `json:"extensions,omitempty"`
+	FunctionQueries       []string            `json:"functionQueries,omitempty"`
+	FunctionQueriesAppend []string            `json:"functionQueriesAppend,omitempty"`
+	TypeQueries           []string            `json:"typeQueries,omitempty"`
+	TypeContextQueries    []string            `json:"typeContextQueries,omitempty"`
+	Regions               map[string][]string `json:"regions,omitempty"`
 }
 
 // Rule describes one check, the code it covers, and how it is reported.
@@ -440,6 +441,13 @@ func validateLanguages(languages map[string]Language) error {
 		if err := validateQueryOverride(id, "functionQueries", language.FunctionQueries); err != nil {
 			return err
 		}
+		if err := validateQueryAppend(
+			id,
+			"functionQueriesAppend",
+			language.FunctionQueriesAppend,
+		); err != nil {
+			return err
+		}
 		if err := validateQueryOverride(id, "typeQueries", language.TypeQueries); err != nil {
 			return err
 		}
@@ -491,6 +499,8 @@ func validateLanguageExtensions(
 }
 
 // validateQueryOverride checks the custom parser queries for one language.
+// validateQueryOverride checks a query replacement. A nil value keeps the
+// preset; an empty list is rejected.
 func validateQueryOverride(id string, field string, values []string) error {
 	if values == nil {
 		return nil
@@ -498,6 +508,17 @@ func validateQueryOverride(id string, field string, values []string) error {
 	if len(values) == 0 {
 		return fmt.Errorf("languages.%s.%s cannot be empty", id, field)
 	}
+	for _, query := range values {
+		if strings.TrimSpace(query) == "" {
+			return fmt.Errorf("languages.%s.%s contains an empty query", id, field)
+		}
+	}
+	return nil
+}
+
+// validateQueryAppend checks appended query patterns. An empty list is a no-op;
+// blank entries are rejected.
+func validateQueryAppend(id string, field string, values []string) error {
 	for _, query := range values {
 		if strings.TrimSpace(query) == "" {
 			return fmt.Errorf("languages.%s.%s contains an empty query", id, field)
