@@ -21,7 +21,7 @@ func TestInitWritesStarterFiles(t *testing.T) {
 		t.Fatalf("init exit = %d; stderr = %q", code, stderr.String())
 	}
 
-	data, err := os.ReadFile(filepath.Join(dir, "jevlint.json"))
+	data, err := os.ReadFile(filepath.Join(dir, ".jevlint.json"))
 	if err != nil {
 		t.Fatalf("read config: %v", err)
 	}
@@ -110,7 +110,7 @@ func TestInitJSONOutput(t *testing.T) {
 	if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
 		t.Fatalf("decode init JSON: %v\n%s", err, stdout.String())
 	}
-	if !strings.HasSuffix(report.Config, "jevlint.json") {
+	if !strings.HasSuffix(report.Config, ".jevlint.json") {
 		t.Fatalf("report = %#v", report)
 	}
 	if len(report.Languages) != 1 || report.Languages[0] != "go" {
@@ -129,7 +129,7 @@ func TestInitLanguagesFlag(t *testing.T) {
 	if code := runCLI(context.Background(), []string{"init", "--languages", "rust"}, &stdout, &stderr); code != 0 {
 		t.Fatalf("init exit = %d; stderr = %q", code, stderr.String())
 	}
-	data, err := os.ReadFile(filepath.Join(dir, "jevlint.json"))
+	data, err := os.ReadFile(filepath.Join(dir, ".jevlint.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -162,7 +162,7 @@ func TestInitDefaultsLanguageWhenEmpty(t *testing.T) {
 	if code := runCLI(context.Background(), []string{"init"}, &stdout, &stderr); code != 0 {
 		t.Fatalf("init exit = %d; stderr = %q", code, stderr.String())
 	}
-	data, err := os.ReadFile(filepath.Join(dir, "jevlint.json"))
+	data, err := os.ReadFile(filepath.Join(dir, ".jevlint.json"))
 	if err != nil {
 		t.Fatal(err)
 	}

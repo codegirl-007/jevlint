@@ -20,10 +20,10 @@ func initUsage() string {
 	return `Usage:
   jevlint init [flags]
 
-Writes a starter jevlint.json with the languages detected in the project.
+Writes a starter .jevlint.json with the languages detected in the project.
 
 Flags:
-  --config path      rule configuration to create (default "jevlint.json")
+  --config path      rule configuration to create (default ".jevlint.json")
   --languages list   comma-separated languages (default: detected)
                      supported: ` + strings.Join(supportedLanguages(), ", ") + `
   --force            overwrite files that already exist
@@ -71,17 +71,25 @@ func executeInit(args []string, stdout io.Writer, stderr io.Writer) int {
 		return exitUsageError
 	}
 
-	absolute, err := filepath.Abs(*configPath)
+	existing, err := existingConfigPaths(*configPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "jevlint: resolve config path: %v\n", err)
+		return exitUsageError
+	}
+	if len(existing) > 0 && !*force {
+		fmt.Fprintf(
+			stderr,
+			"jevlint: %s already exists; pass --force to overwrite\n",
+			existing[0],
+		)
+		return exitUsageError
+	}
+	absolute, err := configPathForInit(*configPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "jevlint: resolve config path: %v\n", err)
 		return exitUsageError
 	}
 	root := filepath.Dir(absolute)
-
-	if _, err := os.Stat(absolute); err == nil && !*force {
-		fmt.Fprintf(stderr, "jevlint: %s already exists; pass --force to overwrite\n", absolute)
-		return exitUsageError
-	}
 
 	selected := []string(nil)
 	if strings.TrimSpace(*languages) != "" {

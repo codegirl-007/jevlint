@@ -7,10 +7,67 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+func TestDoctorRenamesLegacyConfig(t *testing.T) {
+	root := t.TempDir()
+	writeProjectConfig(t, root)
+	t.Chdir(root)
+	t.Setenv("TYPESAFE_API_KEY", "apikey_test")
+	t.Setenv("JEVLINT_PROVIDER", "")
+
+	var stdout, stderr bytes.Buffer
+	code := runCLI(
+		context.Background(),
+		[]string{"doctor", "--offline"},
+		&stdout,
+		&stderr,
+	)
+	if code != 0 {
+		t.Fatalf("doctor exit = %d; stderr = %q", code, stderr.String())
+	}
+	if _, err := os.Stat(filepath.Join(root, ".jevlint.json")); err != nil {
+		t.Fatalf(".jevlint.json missing: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "jevlint.json")); !os.IsNotExist(err) {
+		t.Fatalf("jevlint.json should be removed (err = %v)", err)
+	}
+	if !strings.Contains(stdout.String(), "renamed jevlint.json to .jevlint.json") {
+		t.Fatalf("stdout = %q, want a rename note", stdout.String())
+	}
+}
+
+func TestDoctorDoesNotRenameExplicitLegacyPath(t *testing.T) {
+	root := t.TempDir()
+	writeProjectConfig(t, root)
+
+	var stdout, stderr bytes.Buffer
+	t.Setenv("TYPESAFE_API_KEY", "apikey_test")
+	code := runCLI(
+		context.Background(),
+		[]string{
+			"doctor",
+			"--offline",
+			"--config",
+			filepath.Join(root, "jevlint.json"),
+		},
+		&stdout,
+		&stderr,
+	)
+	if code != 0 {
+		t.Fatalf("doctor exit = %d", code)
+	}
+	if _, err := os.Stat(filepath.Join(root, "jevlint.json")); err != nil {
+		t.Fatal("legacy config should remain when --config names it")
+	}
+	if strings.Contains(stdout.String(), "renamed") {
+		t.Fatalf("stdout = %q, should not rename", stdout.String())
+	}
+}
 
 func TestDoctorOfflineReportsHealthy(t *testing.T) {
 	root := t.TempDir()

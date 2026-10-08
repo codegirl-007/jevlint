@@ -406,6 +406,11 @@ func (client *Client) Ping(ctx context.Context) error {
 	return err
 }
 
+// decisionsAPIProvider encodes requests for the OpenAI Decisions API shape.
+type decisionsAPIProvider interface {
+	MarshalRequest(model string, batch Batch) ([]byte, error)
+}
+
 // requestBody builds the body sent to the service.
 func (client *Client) requestBody(batch Batch) ([]byte, error) {
 	questions, err := questionsForBatch(batch)
@@ -415,11 +420,16 @@ func (client *Client) requestBody(batch Batch) ([]byte, error) {
 	if err := client.provider.ValidateQuestions(questions); err != nil {
 		return nil, err
 	}
-	body, err := json.Marshal(systemOneRequest{
-		Model:     client.model,
-		State:     requestStateFrom(batch.CodeUnit, batch.Evidence),
-		Questions: questions,
-	})
+	var body []byte
+	if decisions, ok := client.provider.(decisionsAPIProvider); ok {
+		body, err = decisions.MarshalRequest(client.model, batch)
+	} else {
+		body, err = json.Marshal(systemOneRequest{
+			Model:     client.model,
+			State:     requestStateFrom(batch.CodeUnit, batch.Evidence),
+			Questions: questions,
+		})
+	}
 	if err != nil {
 		return nil, fmt.Errorf("encode request: %w", err)
 	}
