@@ -377,6 +377,11 @@ func (client *Client) Model() string {
 	return client.model
 }
 
+// ProviderName returns the configured decision backend.
+func (client *Client) ProviderName() string {
+	return client.provider.Name()
+}
+
 // CredentialKind describes the credential without revealing it.
 func (client *Client) CredentialKind() string {
 	return client.provider.DescribeCredential(client.apiKey)

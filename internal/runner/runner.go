@@ -48,6 +48,7 @@ type Report struct {
 	CodeUnits    int                    `json:"codeUnits"`
 	Evaluations  int                    `json:"evaluations"`
 	Cache        *evaluation.CacheStats `json:"cache,omitempty"`
+	Timing       *evaluation.RunTiming  `json:"timing,omitempty"`
 	Findings     []Finding              `json:"findings"`
 	SourcePaths  []string               `json:"-"`
 }

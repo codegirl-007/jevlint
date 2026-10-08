@@ -89,6 +89,7 @@ go run ./cmd/jevlint eval --rule database-joins --format json
 | `--concurrency number` | Set the maximum number of concurrent Jev requests. Defaults to `4`. |
 | `--format text\|json` | Select human-readable or machine-readable output. Defaults to `text`. |
 | `--refresh-cache` | Reevaluate code and replace matching cached results. |
+| `--timed-run` | Print wall-clock run time plus provider and model (for comparing backends). |
 
 ## Configuration
 
