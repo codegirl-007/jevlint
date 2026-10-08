@@ -43,6 +43,36 @@ func TestVersionCommand(t *testing.T) {
 	}
 }
 
+func TestCheckResolvesLegacyConfigWithoutFlag(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(
+		filepath.Join(root, "jevlint.json"),
+		[]byte(`{"languages": {"go": {}}}`),
+		0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(root, "sample.go"),
+		[]byte("package sample\n\nfunc Ready() {}\n"),
+		0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(root)
+	t.Setenv("TYPESAFE_API_KEY", "sk-test")
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+
+	var stdout, stderr bytes.Buffer
+	code := runCLI(context.Background(), []string{"check", root}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("check exit = %d; stderr = %q", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "no rules are configured") {
+		t.Fatalf("stderr = %q, want a no-rules warning", stderr.String())
+	}
+}
+
 func TestCheckWarnsWhenNoRules(t *testing.T) {
 	root := t.TempDir()
 	if err := os.WriteFile(

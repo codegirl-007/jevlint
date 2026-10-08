@@ -38,12 +38,18 @@ type Provider interface {
 // JEVLINT_PROVIDER=cloudflare to talk to the Clef models hosted on Cloudflare
 // Workers AI using CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_AUTH_TOKEN (or
 // CLOUDFLARE_API_TOKEN), with CLEF_MODEL selecting "clef" or "clef-flash".
+// JEVLINT_PROVIDER=openai uses OPENAI_API_KEY and POST /v1/decisions.
 // TYPESAFE_ENDPOINT overrides the request URL for any provider.
 func NewClientFromEnv(options Options, getenv func(string) string) (*Client, error) {
 	if getenv == nil {
 		return NewClientWithProvider(TypeSafeProvider{}, options)
 	}
 	name := strings.ToLower(strings.TrimSpace(getenv("JEVLINT_PROVIDER")))
+	if name == "" &&
+		cleanCredential(getenv("OPENAI_API_KEY")) != "" &&
+		strings.TrimSpace(getenv("TYPESAFE_API_KEY")) == "" {
+		name = "openai"
+	}
 	provider, err := providerByName(name)
 	if err != nil {
 		return nil, err
@@ -90,6 +96,8 @@ func providerByName(name string) (Provider, error) {
 		return CloudflareProvider{}, nil
 	case "openrouter":
 		return &OpenRouterProvider{}, nil
+	case "openai":
+		return OpenAIProvider{}, nil
 	default:
 		return nil, fmt.Errorf("unknown JEVLINT_PROVIDER %q", name)
 	}

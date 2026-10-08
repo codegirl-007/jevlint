@@ -329,7 +329,7 @@ func parsePluginArgs(args []string, minPositional int, stderr io.Writer) (string
 }
 
 func loadProjectFile(configPath string, stderr io.Writer) (config.Config, string, int) {
-	absolute, err := filepath.Abs(configPath)
+	absolute, err := resolveConfigPath(configPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "jevlint: resolve config path: %v\n", err)
 		return config.Config{}, "", exitUsageError

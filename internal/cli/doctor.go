@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 
 	"github.com/codegirl-007/jevlint/internal/config"
 	"github.com/codegirl-007/jevlint/internal/evaluation"
@@ -20,7 +19,7 @@ const doctorUsage = `Usage:
 Checks that the rule configuration loads and that the API credentials work.
 
 Flags:
-  --config path    rule configuration (default "jevlint.json")
+  --config path    rule configuration (default ".jevlint.json")
   --offline        skip the live request to the service
   --json           print machine-readable output
 `
@@ -65,7 +64,7 @@ func executeDoctor(
 	checks := make([]doctorCheck, 0, 3)
 	healthy := true
 
-	absolute, err := filepath.Abs(*configPath)
+	absolute, migrationNote, err := prepareDoctorConfig(*configPath)
 	if err != nil {
 		checks = append(checks, doctorCheck{Name: "config", Detail: err.Error()})
 		healthy = false
@@ -74,15 +73,19 @@ func executeDoctor(
 			checks = append(checks, doctorCheck{Name: "config", Detail: err.Error()})
 			healthy = false
 		} else {
+			detail := fmt.Sprintf(
+				"%s (%d languages, %d rules)",
+				absolute,
+				len(cfg.Languages),
+				len(cfg.Rules),
+			)
+			if migrationNote != "" {
+				detail = migrationNote + "; " + detail
+			}
 			checks = append(checks, doctorCheck{
 				Name: "config",
 				OK:   true,
-				Detail: fmt.Sprintf(
-					"%s (%d languages, %d rules)",
-					absolute,
-					len(cfg.Languages),
-					len(cfg.Rules),
-				),
+				Detail: detail,
 			})
 		}
 	}

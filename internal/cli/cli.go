@@ -31,7 +31,7 @@ Check flags:
   --changed             check only git-modified files
   --clear-cache         clear this project's cached evaluations before checking
   --color mode          color output: auto, always, or never (default "auto")
-  --config path         rule configuration (default "jevlint.json")
+  --config path         rule configuration (default ".jevlint.json")
   --concurrency number  maximum concurrent Jev requests (default 4)
   --format text|json    output format (default "text")
   --refresh-cache       reevaluate and replace current cached results
@@ -39,7 +39,7 @@ Check flags:
 Eval flags:
   --clear-cache         clear this project's cached evaluations before evaluating
   --color mode          color output: auto, always, or never (default "auto")
-  --config path         rule configuration (default "jevlint.json")
+  --config path         rule configuration (default ".jevlint.json")
   --concurrency number  maximum concurrent Jev requests (default 4)
   --evals path          eval cases (default "jevlint-evals.json" next to --config)
   --format text|json    output format (default "text")
@@ -61,7 +61,7 @@ const evalUsage = `Usage:
 Flags:
   --clear-cache         clear this project's cached evaluations before evaluating
   --color mode          color output: auto, always, or never (default "auto")
-  --config path         rule configuration (default "jevlint.json")
+  --config path         rule configuration (default ".jevlint.json")
   --concurrency number  maximum concurrent Jev requests (default 4)
   --evals path          eval cases (default "jevlint-evals.json" next to --config)
   --format text|json    output format (default "text")
@@ -87,7 +87,7 @@ Init flags:
   --force               write into a non-empty directory
 
 Flags:
-  --config path         rule configuration (default "jevlint.json")
+  --config path         rule configuration (default ".jevlint.json")
 `
 }
 
@@ -410,10 +410,7 @@ func parseRunOptions(
 	}, exitSuccess, true
 }
 
-const (
-	defaultConfigFile       = "jevlint.json"
-	defaultCheckConcurrency = 4
-)
+const defaultCheckConcurrency = 4
 
 // parseOutputOptions checks the format, color, and concurrency values.
 func parseOutputOptions(
@@ -474,7 +471,7 @@ func applyChangedFilter(
 	if !options.check.changed {
 		return options, 0, true
 	}
-	absoluteConfig, err := filepath.Abs(options.check.configPath)
+	absoluteConfig, err := resolveConfigPath(options.check.configPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "jevlint: resolve config path: %v\n", err)
 		return runOptions{}, 2, false
@@ -564,7 +561,7 @@ func loadProject(
 	stderr io.Writer,
 	userCacheDir func() (string, error),
 ) (string, config.Config, *parsing.Extractor, []packs.Loaded, int) {
-	absoluteConfig, err := filepath.Abs(configPath)
+	absoluteConfig, err := resolveConfigPath(configPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "jevlint: resolve config path: %v\n", err)
 		return "", config.Config{}, nil, nil, exitUsageError

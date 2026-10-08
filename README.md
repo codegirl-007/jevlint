@@ -1,7 +1,7 @@
 # Jevlint
 
 Jevlint checks code against plain-language rules. It uses Tree-sitter to extract
-code units, then asks Jev whether each one passes.
+code units, then asks your configured decision backend whether each one passes.
 
 ## Install
 
@@ -18,17 +18,26 @@ go install github.com/codegirl-007/jevlint/cmd/jevlint@latest
 
 ## Getting started
 
+Install `jevlint`, then work through these steps in your repository:
+
+1. **Create `.jevlint.json`** — `jevlint init` detects languages in the project
+   and writes a starter config (legacy `jevlint.json` is still read if present).
+2. **Add rules** — Edit `.jevlint.json` or install a pack. Without rules,
+   `check` has nothing to evaluate.
+3. **Set credentials** — Export an API key for your provider (TypeSafe below;
+   OpenAI, OpenRouter, and Cloudflare are in [Providers](#providers)).
+4. **Verify** — `jevlint doctor` should report the config and API as OK.
+5. **Check the tree** — `jevlint check .` prints findings. Exit code `0` means
+   no failures above your confidence thresholds.
+
 ```sh
 cd your-project
-jevlint init                          # write a starter jevlint.json
-export TYPESAFE_API_KEY=apikey_...    # from console.typesafe.ai
-jevlint doctor                        # verify the config and credentials
+jevlint init
+# add rules to .jevlint.json, or: jevlint plugin install ...
+export TYPESAFE_API_KEY=apikey_...    # https://console.typesafe.ai/settings/keys
+jevlint doctor
 jevlint check .
 ```
-
-`init` detects the languages in the project and writes a starter
-`jevlint.json`. Add rules to `jevlint.json` (or install a pack) before the
-first check.
 
 ## Requirements
 
@@ -38,14 +47,15 @@ Building from source (or installing with `go install`) needs:
 - CGO enabled
 - A C compiler
 
-Running checks needs a TypeSafe API key from
+Running checks needs credentials for a [decision provider](#providers). The
+default is TypeSafe; create a key at
 <https://console.typesafe.ai/settings/keys>.
 
 ## Commands
 
 | Command | Description |
 | --- | --- |
-| `jevlint init` | Write a starter `jevlint.json` for the project. |
+| `jevlint init` | Write a starter `.jevlint.json` for the project. |
 | `jevlint doctor` | Check that the config loads and the credentials work. |
 | `jevlint check [paths...]` | Check code against the rules. |
 | `jevlint eval` | Score rules against fixtures in `jevlint-evals.json`. |
@@ -56,8 +66,8 @@ Running checks needs a TypeSafe API key from
 
 ## Run
 
-Set `TYPESAFE_API_KEY` in your environment (see
-[Configuration](#configuration)), then run from the project root:
+When working on jevlint itself, set provider credentials (see
+[Configuration](#configuration)) and run from the repository root:
 
 ```sh
 go run ./cmd/jevlint init
@@ -82,39 +92,50 @@ go run ./cmd/jevlint eval --rule database-joins --format json
 
 ## Configuration
 
-Jevlint reads `jevlint.json` for rules. Credentials and provider settings come
-from environment variables.
+**Project rules** live in `.jevlint.json`. `jevlint init` creates that file.
+When you run commands without `--config`, jevlint loads `.jevlint.json` if it
+exists; otherwise it loads `jevlint.json` for older projects. Run
+`jevlint doctor` to rename a legacy `jevlint.json` to `.jevlint.json`. Use
+`--config path` only when the file is not in the project root or you want a
+non-default name. `init` does not create `.env` or other project files.
 
-```sh
-export TYPESAFE_API_KEY=apikey_...
-```
+**API access** is configured with environment variables. Pick a backend and set
+its variables as described under [Providers](#providers). Jevlint never writes
+credentials into the repository.
 
-`init` writes only `jevlint.json`; it does not create or modify any other file.
-
-- **Keep it secret:** export the key from your shell profile or a secret
-  manager. Jevlint never writes credentials into the project.
-- **Debugging:** set `JEVLINT_DEBUG=1` to print each request URL, the
+**Debugging:** set `JEVLINT_DEBUG=1` to print each request URL, the
   credential kind (never the value), the request payload (capped for size), and
   the response to stderr. Search it with `less`: redirect stderr to a file and
   look for `payload to jev`.
 
 ### Providers
 
-Jevlint selects a provider from `JEVLINT_PROVIDER`: `typesafe`, `jev`,
-`cloudflare`, `clef`, or `openrouter` (default: `typesafe`). The default talks
-to TypeSafe's Jev at `https://api.typesafe.ai/v1/systemone`.
-`cloudflare`/`clef` use Cloudflare Workers AI, and `openrouter` uses Jev
-through OpenRouter (see below).
+Set `JEVLINT_PROVIDER` to choose a backend (`typesafe`, `jev`, `cloudflare`,
+`clef`, `openrouter`, or `openai`). When it is unset, jevlint uses TypeSafe
+unless only `OPENAI_API_KEY` is set (see [OpenAI](#openai)).
+
+#### TypeSafe (Jev)
+
+The default. [TypeSafe](https://typesafe.ai) hosts **Jev**, the decision model
+jevlint is built for. Create an API key at
+<https://console.typesafe.ai/settings/keys>, then export it:
+
+```sh
+export TYPESAFE_API_KEY=apikey_...
+# optional; typesafe and jev are equivalent names for this provider
+export JEVLINT_PROVIDER=typesafe
+```
 
 | Variable | Meaning |
 | --- | --- |
-| `JEVLINT_PROVIDER` | Provider: `typesafe`, `jev`, `cloudflare`, `clef`, or `openrouter` (default: `typesafe`). |
-| `TYPESAFE_API_KEY` | API key. |
+| `TYPESAFE_API_KEY` | TypeSafe API key (required for this provider). |
 | `TYPESAFE_BASE_URL` | Service base URL. Defaults to `https://api.typesafe.ai`. |
 | `TYPESAFE_DEFAULT_MODEL` | Model name. Defaults to `jev-latest`. |
 | `TYPESAFE_ENDPOINT` | Full request URL, bypassing `TYPESAFE_BASE_URL`. |
 
-Set `TYPESAFE_ENDPOINT` to target another SystemOne-compatible service.
+Requests go to `https://api.typesafe.ai/v1/systemone`. Set `TYPESAFE_ENDPOINT`
+to point at another SystemOne-compatible service (proxy, local gateway, or
+alternate host).
 
 #### Cloudflare Workers AI (Clef)
 
@@ -182,9 +203,26 @@ Requests go to `https://openrouter.ai/api/v1/systemone`, and the
 request and response shape as TypeSafe's Jev, so rules, findings, and caching
 work unchanged.
 
+#### OpenAI
+
+The [Decisions API](https://developers.openai.com/api/docs/guides/decisions) on
+[OpenAI](https://platform.openai.com)—not Jev. Set `JEVLINT_PROVIDER=openai`:
+
+```sh
+export JEVLINT_PROVIDER=openai
+export OPENAI_API_KEY=sk-...
+```
+
+| Variable | Meaning |
+| --- | --- |
+| `OPENAI_API_KEY` | OpenAI API key. |
+
+Confidence thresholds may differ from TypeSafe or OpenRouter; tune them for your
+project.
+
 ## Rules
 
-Jevlint reads `jevlint.json` by default.
+Jevlint reads `.jevlint.json` by default, or `jevlint.json` for older projects.
 
 ```json
 {
@@ -368,7 +406,7 @@ have many cases, including several for the same language.
 | `--concurrency number` | Set the maximum number of concurrent Jev requests. Defaults to `4`. |
 | `--evals path` | Use a different eval file. Fixtures stay relative to that file. |
 | `--format text\|json` | Select human-readable or machine-readable output. Defaults to `text`. |
-| `--packs` | Also run evals from packs listed in `jevlint.json`. |
+| `--packs` | Also run evals from packs listed in the project config. |
 | `--refresh-cache` | Reevaluate code and replace matching cached results. |
 | `--rule id` | Evaluate only this rule's cases. |
 | `--verbose` | Include the per-unit decisions in JSON output. |
@@ -414,7 +452,7 @@ Exit codes:
 ## Packs
 
 A pack is a shared directory with a `pack.json` manifest, rules, optional evals,
-and fixtures. Pins live in `jevlint.json`; fetched files live in the user cache,
+and fixtures. Pins live in the project config; fetched files live in the user cache,
 not the project tree.
 
 ```text
