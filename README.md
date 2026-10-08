@@ -228,6 +228,24 @@ regions. Override only what your project needs:
 Presets use native Tree-sitter grammars compiled into Jevlint. Config can
 customize a preset, but it cannot load an arbitrary external grammar.
 
+`functionQueries` **replaces** the built-in function extraction query for a
+language. Use `functionQueriesAppend` to **add** patterns without losing the
+built-in ones. Both take query strings that capture `@function` for the unit and
+`@name` for its name. Appended patterns run after the built-in ones, and a unit
+matched by more than one pattern is extracted once.
+
+```json
+{
+  "languages": {
+    "typescript": {
+      "functionQueriesAppend": [
+        "(call_expression function: (identifier) @_fn arguments: (arguments . (string (string_fragment) @name) . [(arrow_function) (function_expression)] @function) (#any-of? @_fn \"describe\"))"
+      ]
+    }
+  }
+}
+```
+
 - `severity`: `info`, `warning`, or `error`
 - `include` and `exclude`: doublestar file patterns
 - `kinds`: `comment`, `docComment`, `field`, `function`, `statement`, or `type`

@@ -215,3 +215,82 @@ func functionNames(functions []CodeUnit) []string {
 	}
 	return names
 }
+
+func TestFunctionQueriesAppendAddsToDefaults(t *testing.T) {
+	t.Parallel()
+
+	// `describe` is not in the built-in query, so it can only come from the append.
+	extractor, err := NewExtractor(map[string]config.Language{
+		"typescript": {
+			FunctionQueriesAppend: []string{
+				"(call_expression function: (identifier) @_fn arguments: (arguments " +
+					". (string (string_fragment) @name) . " +
+					"[(arrow_function) (function_expression)] @function) " +
+					"(#any-of? @_fn \"describe\"))",
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewExtractor() error = %v", err)
+	}
+
+	units, err := extractor.Extract("sample.ts", []byte(
+		"function bar() {}\ndescribe(\"suite\", () => {});\n",
+	))
+	if err != nil {
+		t.Fatalf("Extract() error = %v", err)
+	}
+	if got := functionNames(functionsIn(units)); !reflect.DeepEqual(got, []string{"bar", "suite"}) {
+		t.Fatalf("function names = %#v, want [bar suite]", got)
+	}
+}
+
+func TestFunctionQueriesAppendComposesWithReplace(t *testing.T) {
+	t.Parallel()
+
+	extractor, err := NewExtractor(map[string]config.Language{
+		"typescript": {
+			FunctionQueries: []string{
+				"(function_declaration\n  name: (identifier) @name) @function",
+			},
+			FunctionQueriesAppend: []string{
+				"(variable_declarator\n  name: (identifier) @name\n" +
+					"  value: [(arrow_function) (function_expression)] @function)",
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewExtractor() error = %v", err)
+	}
+
+	units, err := extractor.Extract("sample.ts", []byte(
+		"function bar() {}\nconst foo = () => {};\nclass C {\n  m() {}\n}\n",
+	))
+	if err != nil {
+		t.Fatalf("Extract() error = %v", err)
+	}
+	// Replace drops the method pattern; append adds the arrow pattern.
+	if got := functionNames(functionsIn(units)); !reflect.DeepEqual(got, []string{"bar", "foo"}) {
+		t.Fatalf("function names = %#v, want [bar foo]", got)
+	}
+}
+
+func TestFunctionQueriesAppendEmptyIsNoOp(t *testing.T) {
+	t.Parallel()
+
+	extractor, err := NewExtractor(map[string]config.Language{
+		"typescript": {FunctionQueriesAppend: []string{}},
+	})
+	if err != nil {
+		t.Fatalf("NewExtractor() error = %v", err)
+	}
+
+	source := "function bar() {}\nconst foo = () => {};\nclass C {\n  m() {}\n}\n"
+	units, err := extractor.Extract("sample.ts", []byte(source))
+	if err != nil {
+		t.Fatalf("Extract() error = %v", err)
+	}
+	if got := functionNames(functionsIn(units)); !reflect.DeepEqual(got, []string{"bar", "foo", "m"}) {
+		t.Fatalf("function names = %#v, want the built-in defaults", got)
+	}
+}

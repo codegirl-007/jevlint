@@ -551,6 +551,7 @@ func TestDecodeLanguageOverrides(t *testing.T) {
 			"cpp": {
 				"extensions": [".cpp", ".hpp"],
 				"functionQueries": ["(function_definition) @function"],
+				"functionQueriesAppend": ["(lambda_expression) @function"],
 				"typeQueries": ["(class_specifier) @type"],
 				"regions": {
 					"comment": ["comment"],
@@ -570,6 +571,7 @@ func TestDecodeLanguageOverrides(t *testing.T) {
 	}
 	if len(cfg.Languages) != 2 ||
 		len(cfg.Languages["cpp"].Extensions) != 2 ||
+		len(cfg.Languages["cpp"].FunctionQueriesAppend) != 1 ||
 		cfg.Languages["java"].Extensions != nil {
 		t.Fatalf("Decode() languages = %#v", cfg.Languages)
 	}
@@ -621,6 +623,12 @@ func TestValidateRejectsInvalidLanguages(t *testing.T) {
 			},
 			want: "languages.go.typeQueries contains an empty query",
 		},
+		"blank appended function query": {
+			languages: map[string]Language{
+				"go": {FunctionQueriesAppend: []string{" "}},
+			},
+			want: "languages.go.functionQueriesAppend contains an empty query",
+		},
 		"invalid region category": {
 			languages: map[string]Language{
 				"go": {Regions: map[string][]string{"banana": {"node"}}},
@@ -648,6 +656,22 @@ func TestValidateRejectsInvalidLanguages(t *testing.T) {
 				t.Fatalf("Validate() error = %v, want %q", err, test.want)
 			}
 		})
+	}
+}
+
+func TestValidateAllowsEmptyFunctionQueriesAppend(t *testing.T) {
+	t.Parallel()
+
+	err := (Config{
+		Languages: map[string]Language{"go": {FunctionQueriesAppend: []string{}}},
+		Rules: []Rule{{
+			ID:          "one",
+			Description: "A rule.",
+			Severity:    SeverityInfo,
+		}},
+	}).Validate()
+	if err != nil {
+		t.Fatalf("Validate() error = %v, want nil for an empty append", err)
 	}
 }
 

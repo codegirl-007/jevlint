@@ -116,6 +116,7 @@ func configuredLanguage(
 	if override.FunctionQueries != nil {
 		functionQueries = append([]string(nil), override.FunctionQueries...)
 	}
+	functionQueries = append(functionQueries, override.FunctionQueriesAppend...)
 	typeQueries := append([]string(nil), preset.queries[queryType]...)
 	if override.TypeQueries != nil {
 		typeQueries = append([]string(nil), override.TypeQueries...)
