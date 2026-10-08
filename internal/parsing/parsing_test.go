@@ -207,40 +207,6 @@ func TestExtractCodeUnits(t *testing.T) {
 			if !reflect.DeepEqual(keys, test.want) {
 				t.Fatalf("Extract() units = %v, want %v", keys, test.want)
 			}
-
-			var contextUnit *CodeUnit
-			for index := range units {
-				if units[index].Kind == CodeKindFunction &&
-					units[index].Name == test.contextUnit {
-					contextUnit = &units[index]
-					break
-				}
-			}
-			if contextUnit == nil {
-				t.Fatalf("context unit %q not found", test.contextUnit)
-			}
-			contextNames := make([]string, 0, len(contextUnit.RelatedTypes))
-			contextSource := ""
-			for _, declaration := range contextUnit.RelatedTypes {
-				contextNames = append(contextNames, declaration.Name)
-				contextSource += declaration.Source
-			}
-			if !reflect.DeepEqual(contextNames, test.wantContextNames) {
-				t.Fatalf(
-					"%s context names = %v, want %v",
-					test.contextUnit,
-					contextNames,
-					test.wantContextNames,
-				)
-			}
-			if !strings.Contains(contextSource, test.wantContextSource) {
-				t.Fatalf(
-					"%s context source = %q, want it to contain %q",
-					test.contextUnit,
-					contextSource,
-					test.wantContextSource,
-				)
-			}
 		})
 	}
 }

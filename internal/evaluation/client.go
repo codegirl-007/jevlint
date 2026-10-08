@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/codegirl-007/jevlint/internal/config"
+	"github.com/codegirl-007/jevlint/internal/evidence"
 	"github.com/codegirl-007/jevlint/internal/parsing"
 )
 
@@ -140,21 +141,17 @@ type requestState struct {
 	Source       string                 `json:"source"`
 	ParentSource string                 `json:"parentSource,omitempty"`
 	RegionKind   parsing.NodeKind       `json:"regionKind,omitempty"`
-	RelatedTypes []requestType          `json:"types,omitempty"`
-	Callees      []requestCallee        `json:"callees,omitempty"`
+	Evidence     []requestEvidence      `json:"evidence,omitempty"`
 }
 
-// requestType is a related type sent as context.
-type requestType struct {
-	Name   string `json:"name"`
-	Source string `json:"source"`
-}
-
-// requestCallee is a called function sent as context.
-type requestCallee struct {
-	Name   string `json:"name"`
-	Path   string `json:"path"`
-	Source string `json:"source"`
+// requestEvidence is one repository fact sent as context, with provenance.
+type requestEvidence struct {
+	Kind      string `json:"kind"`
+	Path      string `json:"path"`
+	StartLine uint   `json:"startLine"`
+	EndLine   uint   `json:"endLine"`
+	Symbol    string `json:"symbol"`
+	Source    string `json:"source"`
 }
 
 // MarshalJSON writes the question kind as its name.
@@ -420,7 +417,7 @@ func (client *Client) requestBody(batch Batch) ([]byte, error) {
 	}
 	body, err := json.Marshal(systemOneRequest{
 		Model:     client.model,
-		State:     requestStateFrom(batch.CodeUnit),
+		State:     requestStateFrom(batch.CodeUnit, batch.Evidence),
 		Questions: questions,
 	})
 	if err != nil {
@@ -436,8 +433,8 @@ func (client *Client) requestBody(batch Batch) ([]byte, error) {
 	return body, nil
 }
 
-// requestStateFrom builds the sent state from a piece of code.
-func requestStateFrom(unit parsing.CodeUnit) requestState {
+// requestStateFrom builds the sent state from a piece of code and its evidence.
+func requestStateFrom(unit parsing.CodeUnit, items []evidence.Evidence) requestState {
 	state := requestState{
 		Kind:         unit.Kind,
 		Name:         unit.Name,
@@ -447,24 +444,15 @@ func requestStateFrom(unit parsing.CodeUnit) requestState {
 		ParentSource: unit.ParentSource,
 		RegionKind:   unit.RegionKind,
 	}
-	if len(unit.RelatedTypes) > 0 {
-		state.RelatedTypes = make([]requestType, 0, len(unit.RelatedTypes))
-		for _, declaration := range unit.RelatedTypes {
-			state.RelatedTypes = append(state.RelatedTypes, requestType{
-				Name:   declaration.Name,
-				Source: declaration.Source,
-			})
-		}
-	}
-	if len(unit.Callees) > 0 {
-		state.Callees = make([]requestCallee, 0, len(unit.Callees))
-		for _, callee := range unit.Callees {
-			state.Callees = append(state.Callees, requestCallee{
-				Name:   callee.Name,
-				Path:   callee.Path,
-				Source: callee.Source,
-			})
-		}
+	for _, item := range items {
+		state.Evidence = append(state.Evidence, requestEvidence{
+			Kind:      string(item.Kind),
+			Path:      item.Path,
+			StartLine: item.StartLine,
+			EndLine:   item.EndLine,
+			Symbol:    item.Symbol,
+			Source:    item.Source,
+		})
 	}
 	return state
 }
@@ -481,7 +469,7 @@ func questionsForBatch(batch Batch) (map[string]question, error) {
 		}
 		questions[rule.ID] = question{
 			Type:         questionTypeChoice,
-			Instructions: instructionsFor(rule, batch.CodeUnit),
+			Instructions: instructionsFor(rule, batch.CodeUnit, len(batch.Evidence) > 0),
 			Criteria:     criteriaFor(rule),
 		}
 	}
@@ -578,6 +566,7 @@ func (client *Client) cacheKey(body []byte) string {
 
 // perform sends a request and retries when the service asks for it.
 func (client *Client) perform(ctx context.Context, body []byte) ([]byte, error) {
+	client.debugf("jevlint: payload to jev: %s", debugBody(body))
 	for attempt := 0; ; attempt++ {
 		request, err := client.newRequest(ctx, body, attempt)
 		if err != nil {
@@ -653,7 +642,6 @@ func (client *Client) newRequest(
 			request.Header.Get("Content-Type"),
 			request.Header.Get("Accept"),
 		)
-		client.debugf("jevlint: request body: %s", debugBody(body))
 	}
 	return request, nil
 }
@@ -675,15 +663,31 @@ func readResponse(response *http.Response) ([]byte, error) {
 func instructionsFor(
 	rule config.Rule,
 	unit parsing.CodeUnit,
+	hasEvidence bool,
 ) string {
 	var builder strings.Builder
-	if unit.ParentSource != "" {
+	switch {
+	case unit.ParentSource != "" && hasEvidence:
 		builder.WriteString(
-			"Determine whether state.source violates this rule. " +
-				"Use state.parentSource only as surrounding context:\n",
+			"Judge only the code in `state.source`. The declaration it sits in " +
+				"(`state.parentSource`) and the related code (`state.evidence`) are " +
+				"background that can help you understand it; they are not what you " +
+				"are judging:\n",
 		)
-	} else {
-		builder.WriteString("Determine whether the supplied code complies with this rule:\n")
+	case unit.ParentSource != "":
+		builder.WriteString(
+			"Judge only the code in `state.source`. The declaration it sits in " +
+				"(`state.parentSource`) is background that can help you understand " +
+				"it; it is not what you are judging:\n",
+		)
+	case hasEvidence:
+		builder.WriteString(
+			"Judge only the code in `state.source`. The related code in " +
+				"`state.evidence` is background that can help you understand it; it " +
+				"is not what you are judging:\n",
+		)
+	default:
+		builder.WriteString("Judge only the code in `state.source`:\n")
 	}
 	builder.WriteString(rule.Description)
 	if len(rule.Exceptions) > 0 {

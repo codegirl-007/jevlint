@@ -2,7 +2,6 @@ package runner
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -12,6 +11,7 @@ import (
 
 	"github.com/codegirl-007/jevlint/internal/config"
 	"github.com/codegirl-007/jevlint/internal/evaluation"
+	"github.com/codegirl-007/jevlint/internal/evidence"
 	"github.com/codegirl-007/jevlint/internal/parsing"
 )
 
@@ -1080,8 +1080,8 @@ func combine(users []User, accounts []Account) {}
 	if !ok {
 		t.Fatalf("missing ordinary buildUsers batch: %#v", evaluator.batches)
 	}
-	if len(ordinaryBuild.CodeUnit.Callees) != 0 {
-		t.Fatalf("ordinary callees = %#v", ordinaryBuild.CodeUnit.Callees)
+	if len(ordinaryBuild.Evidence) != 0 {
+		t.Fatalf("ordinary evidence = %#v", ordinaryBuild.Evidence)
 	}
 	if _, hasJoins := ruleIDs(ordinaryBuild)["database-joins"]; hasJoins {
 		t.Fatal("ordinary batch included callee-context rule")
@@ -1094,24 +1094,9 @@ func combine(users []User, accounts []Account) {}
 	if _, hasNaming := ruleIDs(enrichedBuild)["naming"]; hasNaming {
 		t.Fatal("enriched batch included ordinary rule")
 	}
-	got := calleeNames(enrichedBuild.CodeUnit.Callees)
+	got := calleeNames(enrichedBuild.Evidence)
 	if strings.Join(got, ",") != "loadUsers,loadAccounts,combine" {
-		t.Fatalf("enriched callees = %#v", enrichedBuild.CodeUnit.Callees)
-	}
-
-	plain, err := json.Marshal(ordinaryBuild.CodeUnit)
-	if err != nil {
-		t.Fatalf("Marshal ordinary error = %v", err)
-	}
-	if strings.Contains(string(plain), `"callees"`) {
-		t.Fatalf("ordinary request included callees: %s", plain)
-	}
-	enrichedJSON, err := json.Marshal(enrichedBuild.CodeUnit)
-	if err != nil {
-		t.Fatalf("Marshal enriched error = %v", err)
-	}
-	if !strings.Contains(string(enrichedJSON), `"callees"`) {
-		t.Fatalf("enriched request missing callees: %s", enrichedJSON)
+		t.Fatalf("enriched callees = %#v", enrichedBuild.Evidence)
 	}
 }
 
@@ -1171,11 +1156,11 @@ func loadUsers() {}
 	if ordinaryLocalize.CodeUnit.Name == "" || enrichedLocalize.CodeUnit.Name == "" {
 		t.Fatalf("localize batches = %#v", evaluator.batches)
 	}
-	if len(ordinaryLocalize.CodeUnit.Callees) != 0 {
-		t.Fatalf("ordinary localize inherited callees: %#v", ordinaryLocalize.CodeUnit.Callees)
+	if len(calleeNames(ordinaryLocalize.Evidence)) != 0 {
+		t.Fatalf("ordinary localize inherited callees: %#v", ordinaryLocalize.Evidence)
 	}
-	if got := calleeNames(enrichedLocalize.CodeUnit.Callees); strings.Join(got, ",") != "loadUsers" {
-		t.Fatalf("enriched localize callees = %#v", enrichedLocalize.CodeUnit.Callees)
+	if got := calleeNames(enrichedLocalize.Evidence); strings.Join(got, ",") != "loadUsers" {
+		t.Fatalf("enriched localize callees = %#v", enrichedLocalize.Evidence)
 	}
 }
 
@@ -1228,10 +1213,12 @@ func ruleIDs(batch evaluation.Batch) map[string]struct{} {
 	return ids
 }
 
-func calleeNames(callees []parsing.CalleeContext) []string {
-	names := make([]string, 0, len(callees))
-	for _, callee := range callees {
-		names = append(names, callee.Name)
+func calleeNames(evidenceItems []evidence.Evidence) []string {
+	names := make([]string, 0, len(evidenceItems))
+	for _, item := range evidenceItems {
+		if item.Kind == evidence.KindCallee {
+			names = append(names, item.Symbol)
+		}
 	}
 	return names
 }

@@ -7,11 +7,14 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 
 	"github.com/codegirl-007/jevlint/internal/config"
 	"github.com/codegirl-007/jevlint/internal/evaluation"
+	"github.com/codegirl-007/jevlint/internal/evidence"
 	"github.com/codegirl-007/jevlint/internal/parsing"
+	"github.com/codegirl-007/jevlint/internal/repository"
 	"github.com/codegirl-007/jevlint/internal/scoping"
 )
 
@@ -51,20 +54,21 @@ type Report struct {
 
 // Finding is one rule failure for one piece of code.
 type Finding struct {
-	RuleID      string            `json:"ruleId"`
-	Description string            `json:"description"`
-	Severity    config.Severity   `json:"severity"`
-	Status      evaluation.Status `json:"status"`
-	Path        string            `json:"path"`
-	Language    string            `json:"language"`
-	Kind        parsing.CodeKind  `json:"kind"`
-	Name        string            `json:"name"`
-	StartLine   uint              `json:"startLine"`
-	EndLine     uint              `json:"endLine"`
-	StartColumn uint              `json:"startColumn"`
-	EndColumn   uint              `json:"endColumn"`
-	Snippet     string            `json:"snippet"`
-	Locations   []Location        `json:"locations,omitempty"`
+	RuleID      string              `json:"ruleId"`
+	Description string              `json:"description"`
+	Severity    config.Severity     `json:"severity"`
+	Status      evaluation.Status   `json:"status"`
+	Path        string              `json:"path"`
+	Language    string              `json:"language"`
+	Kind        parsing.CodeKind    `json:"kind"`
+	Name        string              `json:"name"`
+	StartLine   uint                `json:"startLine"`
+	EndLine     uint                `json:"endLine"`
+	StartColumn uint                `json:"startColumn"`
+	EndColumn   uint                `json:"endColumn"`
+	Snippet     string              `json:"snippet"`
+	Locations   []Location          `json:"locations,omitempty"`
+	Evidence    []evidence.Evidence `json:"evidence,omitempty"`
 }
 
 // Location is a smaller place inside a finding.
@@ -78,10 +82,12 @@ type Location struct {
 	EndColumn   uint   `json:"endColumn"`
 }
 
-// evaluationJob is one piece of code and the rules to check against it.
+// evaluationJob is one piece of code, the rules to check against it, and the
+// repository evidence gathered for those rules.
 type evaluationJob struct {
-	rules []config.Rule
-	unit  parsing.CodeUnit
+	rules    []config.Rule
+	unit     parsing.CodeUnit
+	evidence []evidence.Evidence
 }
 
 // evaluationOutcome is the result of one job.
@@ -92,9 +98,10 @@ type evaluationOutcome struct {
 
 // pendingFinding is a finding that may still gain a location.
 type pendingFinding struct {
-	finding Finding
-	rule    config.Rule
-	unit    parsing.CodeUnit
+	finding  Finding
+	rule     config.Rule
+	unit     parsing.CodeUnit
+	evidence []evidence.Evidence
 }
 
 // localizationJob is one attempt to point at the exact place that failed.
@@ -103,6 +110,7 @@ type localizationJob struct {
 	rule         config.Rule
 	parent       parsing.CodeUnit
 	region       parsing.Region
+	evidence     []evidence.Evidence
 }
 
 // localizationOutcome is the place found for one finding.
@@ -122,6 +130,7 @@ type checkSetup struct {
 // plannedFile is a source file and the work it produced.
 type plannedFile struct {
 	relative   string
+	extraction parsing.FileExtraction
 	units      []parsing.CodeUnit
 	applicable []config.Rule
 }
@@ -245,7 +254,8 @@ func (runner Runner) prepareCheck(options Options) (checkSetup, error) {
 	}, nil
 }
 
-// planEvaluations reads the files and builds the work for each one.
+// planEvaluations reads the files, builds the repository index, and builds the
+// work for each one.
 func (runner Runner) planEvaluations(
 	ctx context.Context,
 	cfg config.Config,
@@ -253,8 +263,10 @@ func (runner Runner) planEvaluations(
 	files []string,
 	sourceOverlay map[string][]byte,
 ) (Report, []evaluationJob, error) {
-	needCallees := rulesWantCallees(cfg.Rules)
+	requests := contextRequests(cfg.Rules)
+	needContext := anyContextRequested(requests)
 	extracted := make([]plannedFile, 0, len(files))
+	extractions := make([]parsing.FileExtraction, 0, len(files))
 	for _, file := range files {
 		if err := ctx.Err(); err != nil {
 			return Report{}, nil, err
@@ -264,7 +276,7 @@ func (runner Runner) planEvaluations(
 			root,
 			file,
 			sourceOverlay,
-			needCallees,
+			needContext,
 		)
 		if err != nil {
 			return Report{}, nil, err
@@ -273,10 +285,9 @@ func (runner Runner) planEvaluations(
 			continue
 		}
 		extracted = append(extracted, planned)
+		extractions = append(extractions, planned.extraction)
 	}
-	if needCallees {
-		parsing.ResolveCallees(functionUnits(extracted))
-	}
+	index := repository.New(extractions, modulePath(root))
 
 	report := Report{Findings: make([]Finding, 0)}
 	jobs := make([]evaluationJob, 0)
@@ -287,9 +298,34 @@ func (runner Runner) planEvaluations(
 		report.ScannedFiles++
 		report.SourcePaths = append(report.SourcePaths, planned.relative)
 		report.CodeUnits += len(planned.units)
-		jobs = append(jobs, jobsForUnits(planned.units, planned.applicable)...)
+		jobs = append(jobs, jobsForUnits(planned.units, planned.applicable, requests, index)...)
 	}
 	return report, jobs, nil
+}
+
+// contextRequests resolves each rule's context configuration once, at the run
+// boundary, so the runner never converts config types per unit.
+func contextRequests(rules []config.Rule) map[string]evidence.Request {
+	requests := make(map[string]evidence.Request, len(rules))
+	for _, rule := range rules {
+		requests[rule.ID] = evidence.Request{
+			Callees:      rule.Context.Callees,
+			Callers:      rule.Context.Callers,
+			RelatedTypes: rule.Context.RelatedTypes,
+			Imports:      rule.Context.Imports,
+		}
+	}
+	return requests
+}
+
+// anyContextRequested reports whether any rule asks for repository evidence.
+func anyContextRequested(requests map[string]evidence.Request) bool {
+	for _, request := range requests {
+		if !request.Empty() {
+			return true
+		}
+	}
+	return false
 }
 
 // extractFile reads one file and records the rules that apply to it.
@@ -298,7 +334,7 @@ func (runner Runner) extractFile(
 	root string,
 	file string,
 	sourceOverlay map[string][]byte,
-	needCallees bool,
+	needContext bool,
 ) (plannedFile, error) {
 	relative, err := relativeProjectPath(root, file)
 	if err != nil {
@@ -314,7 +350,7 @@ func (runner Runner) extractFile(
 			applicable = append(applicable, rule)
 		}
 	}
-	if len(applicable) == 0 && !needCallees {
+	if len(applicable) == 0 && !needContext {
 		return plannedFile{}, nil
 	}
 	source, err := readOverlayOrFile(file, relative, sourceOverlay)
@@ -324,13 +360,14 @@ func (runner Runner) extractFile(
 		}
 		return plannedFile{}, err
 	}
-	units, err := runner.Extractor.Extract(relative, source)
+	extraction, err := runner.Extractor.ExtractFile(relative, source)
 	if err != nil {
 		if len(applicable) == 0 {
 			return plannedFile{}, nil
 		}
 		return plannedFile{}, err
 	}
+	units := extraction.Units
 	if len(applicable) > 0 {
 		requested := requestedRegionKinds(applicable)
 		if len(requested) > 0 {
@@ -339,33 +376,10 @@ func (runner Runner) extractFile(
 	}
 	return plannedFile{
 		relative:   relative,
+		extraction: extraction,
 		units:      units,
 		applicable: applicable,
 	}, nil
-}
-
-// functionUnits collects the function units from the planned files.
-func functionUnits(files []plannedFile) []*parsing.CodeUnit {
-	functions := make([]*parsing.CodeUnit, 0)
-	for fileIndex := range files {
-		for unitIndex := range files[fileIndex].units {
-			unit := &files[fileIndex].units[unitIndex]
-			if unit.Kind == parsing.CodeKindFunction {
-				functions = append(functions, unit)
-			}
-		}
-	}
-	return functions
-}
-
-// rulesWantCallees reports whether any rule asks for the called functions.
-func rulesWantCallees(rules []config.Rule) bool {
-	for _, rule := range rules {
-		if rule.Context.Callees {
-			return true
-		}
-	}
-	return false
 }
 
 // relativeProjectPath returns a path relative to the project root.
@@ -397,30 +411,77 @@ func readOverlayOrFile(
 	return source, nil
 }
 
-// jobsForUnits builds the work for each code unit and its rules.
-func jobsForUnits(units []parsing.CodeUnit, rules []config.Rule) []evaluationJob {
+// modulePath returns the Go module path declared in the repository's go.mod,
+// or "" when there is none. It decides whether a non-relative import can name
+// code in this repository.
+func modulePath(root string) string {
+	data, err := os.ReadFile(filepath.Join(root, "go.mod"))
+	if err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 2 && fields[0] == "module" {
+			return fields[1]
+		}
+	}
+	return ""
+}
+
+// jobsForUnits builds the work for each code unit, grouping rules by the
+// evidence they request so each request carries only the context it needs.
+func jobsForUnits(
+	units []parsing.CodeUnit,
+	rules []config.Rule,
+	requests map[string]evidence.Request,
+	index *repository.RepositoryIndex,
+) []evaluationJob {
 	jobs := make([]evaluationJob, 0, len(units))
 	for _, unit := range units {
-		ordinary := make([]config.Rule, 0, len(rules))
-		enriched := make([]config.Rule, 0, len(rules))
+		groups := make(map[evidence.Request][]config.Rule)
+		order := make([]evidence.Request, 0)
 		for _, rule := range rules {
 			if !appliesToKind(rule, unit.Kind) {
 				continue
 			}
-			if rule.Context.Callees {
-				enriched = append(enriched, rule)
-				continue
+			request := requests[rule.ID]
+			if _, exists := groups[request]; !exists {
+				order = append(order, request)
 			}
-			ordinary = append(ordinary, rule)
+			groups[request] = append(groups[request], rule)
 		}
-		if len(ordinary) > 0 {
-			jobs = append(jobs, evaluationJob{rules: ordinary, unit: unit})
-		}
-		if len(enriched) > 0 {
-			jobs = append(jobs, evaluationJob{rules: enriched, unit: unit})
+		sort.SliceStable(order, func(i, j int) bool {
+			return requestRank(order[i]) < requestRank(order[j])
+		})
+		for _, request := range order {
+			jobs = append(jobs, evaluationJob{
+				rules:    groups[request],
+				unit:     unit,
+				evidence: index.EvidenceFor(unit, request),
+			})
 		}
 	}
 	return jobs
+}
+
+// requestRank orders context signatures deterministically. An empty request
+// sorts before any enriched request, matching the previous ordinary/enriched
+// split.
+func requestRank(request evidence.Request) int {
+	rank := 0
+	if request.Callees {
+		rank |= 1
+	}
+	if request.Callers {
+		rank |= 2
+	}
+	if request.RelatedTypes {
+		rank |= 4
+	}
+	if request.Imports {
+		rank |= 8
+	}
+	return rank
 }
 
 // selectClosestRegions picks each wanted region once, from its closest parent.
@@ -538,7 +599,6 @@ func regionCodeUnit(
 		EndColumn:    region.EndColumn,
 		StartByte:    region.StartByte,
 		EndByte:      region.EndByte,
-		RelatedTypes: parent.RelatedTypes,
 	}
 }
 
@@ -653,7 +713,8 @@ func evaluateJob(
 ) (evaluationOutcome, error) {
 	results, err := evaluator.Evaluate(ctx, evaluation.Batch{
 		Rules:    job.rules,
-		CodeUnit: requestUnit(job),
+		CodeUnit: job.unit,
+		Evidence: job.evidence,
 	})
 	if err != nil {
 		return evaluationOutcome{}, fmt.Errorf(
@@ -708,9 +769,11 @@ func evaluateJob(
 				EndColumn:   job.unit.EndColumn,
 				Snippet:     job.unit.Source,
 				Locations:   directUnitLocations(job.unit),
+				Evidence:    job.evidence,
 			},
-			rule: rule,
-			unit: job.unit,
+			rule:     rule,
+			unit:     job.unit,
+			evidence: job.evidence,
 		})
 	}
 	return outcome, nil
@@ -730,14 +793,6 @@ func directUnitLocations(unit parsing.CodeUnit) []Location {
 		StartColumn: unit.StartColumn,
 		EndColumn:   unit.EndColumn,
 	}}
-}
-
-// requestUnit adds the called functions when the rules ask for them.
-func requestUnit(job evaluationJob) parsing.CodeUnit {
-	if rulesWantCallees(job.rules) {
-		return parsing.WithCalleeContext(job.unit)
-	}
-	return job.unit
 }
 
 // localizeFindings points at the exact places inside failed units.
@@ -782,6 +837,7 @@ func localizationJobs(findings []pendingFinding) []localizationJob {
 				rule:         item.rule,
 				parent:       item.unit,
 				region:       region,
+				evidence:     item.evidence,
 			})
 		}
 	}
@@ -808,14 +864,11 @@ func evaluateLocalizationJob(
 		EndColumn:    job.region.EndColumn,
 		StartByte:    job.region.StartByte,
 		EndByte:      job.region.EndByte,
-		RelatedTypes: job.parent.RelatedTypes,
-	}
-	if job.rule.Context.Callees {
-		candidate.Callees = parsing.ExpandCallees(job.parent.Resolved)
 	}
 	results, err := evaluator.Evaluate(ctx, evaluation.Batch{
 		Rules:    []config.Rule{job.rule},
 		CodeUnit: candidate,
+		Evidence: job.evidence,
 	})
 	if err != nil {
 		return localizationOutcome{}, fmt.Errorf(

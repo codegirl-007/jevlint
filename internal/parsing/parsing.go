@@ -10,26 +10,24 @@ import (
 	tree_sitter "github.com/tree-sitter/go-tree-sitter"
 )
 
-// CodeUnit is one function or type read from a source file.
+// CodeUnit is one function or type read from a source file. It holds only the
+// declaration and the regions found inside it; repository relationships live
+// in the repository index.
 type CodeUnit struct {
-	Kind         CodeKind          `json:"kind"`
-	Name         string            `json:"name"`
-	Language     SourceLanguage    `json:"language"`
-	Path         string            `json:"path"`
-	Source       string            `json:"source"`
-	ParentSource string            `json:"parentSource,omitempty"`
-	RegionKind   NodeKind          `json:"regionKind,omitempty"`
-	StartLine    uint              `json:"startLine"`
-	EndLine      uint              `json:"endLine"`
-	StartColumn  uint              `json:"startColumn"`
-	EndColumn    uint              `json:"endColumn"`
-	StartByte    uint              `json:"startByte"`
-	EndByte      uint              `json:"endByte"`
-	RelatedTypes []TypeDeclaration `json:"types,omitempty"`
-	Callees      []CalleeContext   `json:"callees,omitempty"`
-	CallRefs     []CallRef         `json:"-"`
-	Resolved     []CalleeContext   `json:"-"`
-	Regions      []Region          `json:"-"`
+	Kind         CodeKind       `json:"kind"`
+	Name         string         `json:"name"`
+	Language     SourceLanguage `json:"language"`
+	Path         string         `json:"path"`
+	Source       string         `json:"source"`
+	ParentSource string         `json:"parentSource,omitempty"`
+	RegionKind   NodeKind       `json:"regionKind,omitempty"`
+	StartLine    uint           `json:"startLine"`
+	EndLine      uint           `json:"endLine"`
+	StartColumn  uint           `json:"startColumn"`
+	EndColumn    uint           `json:"endColumn"`
+	StartByte    uint           `json:"startByte"`
+	EndByte      uint           `json:"endByte"`
+	Regions      []Region       `json:"-"`
 
 	// docStart is where the declaration itself starts, after any leading
 	// comment. It is zero for units that are not functions or types.
@@ -98,6 +96,38 @@ type TypeDeclaration struct {
 	EndByte   uint   `json:"endByte"`
 }
 
+// Import is one import statement or spec read from a source file. Alias is the
+// local name the import is bound to, or empty when the import introduces no
+// resolvable qualifier.
+type Import struct {
+	Path      string `json:"path"`
+	Alias     string `json:"alias,omitempty"`
+	StartLine uint   `json:"startLine"`
+	EndLine   uint   `json:"endLine"`
+	StartByte uint   `json:"startByte"`
+	EndByte   uint   `json:"endByte"`
+	Source    string `json:"source"`
+}
+
+// CallRecord is one syntactic call and where the called name appears.
+type CallRecord struct {
+	Ref       CallRef
+	StartLine uint
+	EndLine   uint
+	StartByte uint
+	EndByte   uint
+	Source    string
+}
+
+// FileExtraction is the deterministic parse product of one source file.
+type FileExtraction struct {
+	Path             string
+	Units            []CodeUnit
+	Calls            []CallRecord
+	Imports          []Import
+	TypeDeclarations []TypeDeclaration
+}
+
 // languageSpec holds the grammar and queries for one language.
 type languageSpec struct {
 	name             string
@@ -107,6 +137,7 @@ type languageSpec struct {
 	typeQuery        *tree_sitter.Query
 	typeContextQuery *tree_sitter.Query
 	callQuery        *tree_sitter.Query
+	importQuery      *tree_sitter.Query
 	regionKinds      map[string]CodeKind
 }
 
@@ -286,14 +317,24 @@ func (extractor *Extractor) Extensions() []string {
 
 // Extract reads the code units from one source file.
 func (extractor *Extractor) Extract(path string, source []byte) ([]CodeUnit, error) {
+	file, err := extractor.ExtractFile(path, source)
+	if err != nil {
+		return nil, err
+	}
+	return file.Units, nil
+}
+
+// ExtractFile reads the code units and their deterministic relationships from
+// one source file.
+func (extractor *Extractor) ExtractFile(path string, source []byte) (FileExtraction, error) {
 	spec, ok := extractor.byExtension[strings.ToLower(filepath.Ext(path))]
 	if !ok {
-		return nil, fmt.Errorf("unsupported source file %q", path)
+		return FileExtraction{}, fmt.Errorf("unsupported source file %q", path)
 	}
 
 	tree, err := parseSource(spec, path, source)
 	if err != nil {
-		return nil, err
+		return FileExtraction{}, err
 	}
 	defer tree.Close()
 
@@ -307,7 +348,6 @@ func (extractor *Extractor) Extract(path string, source []byte) ([]CodeUnit, err
 		"function",
 		CodeKindFunction,
 	)
-	attachCallRefs(spec, source, root, functions)
 	types := extractMatches(
 		spec,
 		path,
@@ -318,7 +358,6 @@ func (extractor *Extractor) Extract(path string, source []byte) ([]CodeUnit, err
 		CodeKindType,
 	)
 	declarations := extractTypeDeclarations(spec, path, source, root, types)
-	attachRelatedTypes(functions, declarations)
 
 	units := append(functions, types...)
 	regions := extractRegions(root, source, spec.regionKinds)
@@ -326,7 +365,13 @@ func (extractor *Extractor) Extract(path string, source []byte) ([]CodeUnit, err
 	attachRegions(units, regions)
 	units = append(units, standaloneComments(spec, path, source, units, regions)...)
 	sortCodeUnits(units)
-	return units, nil
+	return FileExtraction{
+		Path:             path,
+		Units:            units,
+		Calls:            extractCalls(spec, source, root),
+		Imports:          extractImports(spec, source, root),
+		TypeDeclarations: declarations,
+	}, nil
 }
 
 // markDocComments marks the leading comments of a function or type as doc
@@ -417,21 +462,6 @@ func extractTypeDeclarations(
 		}
 	}
 	return declarations
-}
-
-// attachRelatedTypes adds the types that a function mentions.
-func attachRelatedTypes(functions []CodeUnit, declarations []TypeDeclaration) {
-	for index := range functions {
-		for _, declaration := range declarations {
-			if declarationContains(declaration, functions[index]) ||
-				containsIdentifier(functions[index].Source, declaration.Name) {
-				functions[index].RelatedTypes = append(
-					functions[index].RelatedTypes,
-					declaration,
-				)
-			}
-		}
-	}
 }
 
 // attachRegions adds the smaller pieces found inside each code unit.
@@ -753,38 +783,6 @@ func isAdjacentCommentGap(gap []byte) bool {
 		}
 	}
 	return true
-}
-
-// declarationContains reports whether a type holds a code unit.
-func declarationContains(declaration TypeDeclaration, unit CodeUnit) bool {
-	return declaration.StartByte <= unit.StartByte && declaration.EndByte >= unit.EndByte
-}
-
-// containsIdentifier reports whether a name appears as a whole word.
-func containsIdentifier(source string, identifier string) bool {
-	for index := 0; index < len(source); {
-		start := strings.Index(source[index:], identifier)
-		if start < 0 {
-			return false
-		}
-		start += index
-		end := start + len(identifier)
-		beforeBoundary := start == 0 || !isIdentifierByte(source[start-1])
-		afterBoundary := end == len(source) || !isIdentifierByte(source[end])
-		if beforeBoundary && afterBoundary {
-			return true
-		}
-		index = end
-	}
-	return false
-}
-
-// isIdentifierByte reports whether a byte can be part of a name.
-func isIdentifierByte(value byte) bool {
-	return value == '_' ||
-		value >= 'a' && value <= 'z' ||
-		value >= 'A' && value <= 'Z' ||
-		value >= '0' && value <= '9'
 }
 
 const javascriptFunctionQuery = `

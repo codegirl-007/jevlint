@@ -25,7 +25,7 @@
         "callees": true
       },
       "include": ["**/*"],
-      "exclude": ["**/examples/**"],
+      "exclude": ["**/examples/**", "**/*_test.go"],
       "exceptions": [
         "The data comes from different services or databases.",
         "The join cannot reasonably be expressed by the database or ORM."
@@ -38,7 +38,7 @@
       "severity": "error",
       "kinds": ["field"],
       "include": ["**/*"],
-      "exclude": ["**/examples/**"]
+      "exclude": ["**/examples/**", "**/*_test.go"]
     },
     {
       "id": "comment-quality",
@@ -46,7 +46,7 @@
       "severity": "warning",
       "kinds": ["comment"],
       "include": ["**/*"],
-      "exclude": ["**/examples/**"]
+      "exclude": ["**/examples/**", "**/*_test.go"]
     },
     {
       "id": "accurate-doc-comments",
@@ -54,7 +54,7 @@
       "severity": "warning",
       "kinds": ["docComment"],
       "include": ["**/*"],
-      "exclude": ["**/examples/**"]
+      "exclude": ["**/examples/**", "**/*_test.go"]
     },
     {
       "id": "redundant-if-statements",
@@ -65,7 +65,7 @@
         "callees": true
       },
       "include": ["**/*"],
-      "exclude": ["**/examples/**"],
+      "exclude": ["**/examples/**", "**/*_test.go"],
       "localize": ["statement"]
     },
     {
@@ -77,7 +77,7 @@
         "callees": true
       },
       "include": ["**/*"],
-      "exclude": ["**/examples/**"]
+      "exclude": ["**/examples/**", "**/*_test.go"]
     },
     {
       "id": "redundant-type-properties",
@@ -85,7 +85,7 @@
       "severity": "warning",
       "kinds": ["type"],
       "include": ["**/*"],
-      "exclude": ["**/examples/**"],
+      "exclude": ["**/examples/**", "**/*_test.go"],
       "localize": ["field"]
     },
     {
@@ -97,7 +97,7 @@
         "callees": true
       },
       "include": ["**/*"],
-      "exclude": ["**/examples/**"]
+      "exclude": ["**/examples/**", "**/*_test.go"]
     },
     {
       "id": "speculative-generalization",
@@ -108,7 +108,7 @@
         "callees": true
       },
       "include": ["**/*"],
-      "exclude": ["**/examples/**"]
+      "exclude": ["**/examples/**", "**/*_test.go"]
     },
     {
       "id": "wrapper-without-value",
@@ -119,7 +119,7 @@
         "callees": true
       },
       "include": ["**/*"],
-      "exclude": ["**/examples/**"]
+      "exclude": ["**/examples/**", "**/*_test.go"]
     },
     {
       "id": "mixed-levels-of-abstraction",
@@ -130,7 +130,7 @@
         "callees": true
       },
       "include": ["**/*"],
-      "exclude": ["**/examples/**"]
+      "exclude": ["**/examples/**", "**/*_test.go"]
     },
     {
       "id": "function-name-behavior-mismatch",
@@ -141,7 +141,7 @@
         "callees": true
       },
       "include": ["**/*"],
-      "exclude": ["**/examples/**"]
+      "exclude": ["**/examples/**", "**/*_test.go"]
     },
     {
       "id": "invalid-state-representation",
@@ -149,7 +149,7 @@
       "severity": "warning",
       "kinds": ["type"],
       "include": ["**/*"],
-      "exclude": ["**/examples/**"],
+      "exclude": ["**/examples/**", "**/*_test.go"],
       "localize": ["field"]
     },
     {
@@ -161,7 +161,7 @@
         "callees": true
       },
       "include": ["**/*"],
-      "exclude": ["**/examples/**"],
+      "exclude": ["**/examples/**", "**/*_test.go"],
       "localize": ["statement"]
     },
     {
@@ -173,7 +173,7 @@
         "callees": true
       },
       "include": ["**/*"],
-      "exclude": ["**/examples/**"]
+      "exclude": ["**/examples/**", "**/*_test.go"]
     },
     {
       "id": "unnecessary-mutation",
@@ -184,7 +184,7 @@
         "callees": true
       },
       "include": ["**/*"],
-      "exclude": ["**/examples/**"],
+      "exclude": ["**/examples/**", "**/*_test.go"],
       "localize": ["statement"]
     },
     {
@@ -196,7 +196,7 @@
         "callees": true
       },
       "include": ["**/*"],
-      "exclude": ["**/examples/**"]
+      "exclude": ["**/examples/**", "**/*_test.go"]
     },
     {
       "id": "coincidental-abstraction",
@@ -207,7 +207,7 @@
         "callees": true
       },
       "include": ["**/*"],
-      "exclude": ["**/examples/**"]
+      "exclude": ["**/examples/**", "**/*_test.go"]
     },
     {
       "id": "temporal-coupling",
@@ -215,7 +215,7 @@
       "severity": "warning",
       "kinds": ["type"],
       "include": ["**/*"],
-      "exclude": ["**/examples/**"]
+      "exclude": ["**/examples/**", "**/*_test.go"]
     },
     {
       "id": "hidden-global-dependency",
@@ -226,7 +226,7 @@
         "callees": true
       },
       "include": ["**/*"],
-      "exclude": ["**/examples/**"],
+      "exclude": ["**/examples/**", "**/*_test.go"],
       "localize": ["statement"]
     },
     {
@@ -238,7 +238,7 @@
         "callees": true
       },
       "include": ["**/*"],
-      "exclude": ["**/examples/**"],
+      "exclude": ["**/examples/**", "**/*_test.go"],
       "localize": ["statement"]
     },
     {
@@ -250,7 +250,7 @@
         "callees": true
       },
       "include": ["**/*"],
-      "exclude": ["**/examples/**"],
+      "exclude": ["**/examples/**", "**/*_test.go"],
       "localize": ["statement"]
     },
     {
@@ -262,7 +262,7 @@
         "callees": true
       },
       "include": ["**/*"],
-      "exclude": ["**/examples/**"],
+      "exclude": ["**/examples/**", "**/*_test.go"],
       "localize": ["statement"]
     },
     {
@@ -274,7 +274,7 @@
         "callees": true
       },
       "include": ["**/*"],
-      "exclude": ["**/examples/**"]
+      "exclude": ["**/examples/**", "**/*_test.go"]
     },
     {
       "id": "excessive-optional-configuration",
@@ -285,7 +285,7 @@
         "callees": true
       },
       "include": ["**/*"],
-      "exclude": ["**/examples/**"],
+      "exclude": ["**/examples/**", "**/*_test.go"],
       "exceptions": [
         "The options are independent command-line flags or a CLI argument parser."
       ]
@@ -296,7 +296,7 @@
       "severity": "warning",
       "kinds": ["function", "type"],
       "include": ["**/*"],
-      "exclude": ["**/examples/**"],
+      "exclude": ["**/examples/**", "**/*_test.go"],
       "localize": ["statement"]
     }
   ]

@@ -32,6 +32,7 @@ const (
 	queryType
 	queryTypeContext
 	queryCall
+	queryImport
 )
 
 // languageQueries holds the queries for one language by kind.
@@ -99,6 +100,9 @@ func closeLanguageQueries(specs ...languageSpec) {
 		}
 		if spec.callQuery != nil {
 			spec.callQuery.Close()
+		}
+		if spec.importQuery != nil {
+			spec.importQuery.Close()
 		}
 	}
 }
@@ -189,6 +193,22 @@ func configuredLanguage(
 			return languageSpec{}, nil, err
 		}
 	}
+	var importQuery *tree_sitter.Query
+	importSource := strings.Join(preset.queries[queryImport], "\n\n")
+	if importSource != "" {
+		importQuery, err = validateImportQuery(preset.name, preset.language, importSource)
+		if err != nil {
+			functionQuery.Close()
+			typeQuery.Close()
+			if typeContextQuery != nil {
+				typeContextQuery.Close()
+			}
+			if callQuery != nil {
+				callQuery.Close()
+			}
+			return languageSpec{}, nil, err
+		}
+	}
 	return languageSpec{
 		name:             preset.name,
 		id:               languageID,
@@ -197,6 +217,7 @@ func configuredLanguage(
 		typeQuery:        typeQuery,
 		typeContextQuery: typeContextQuery,
 		callQuery:        callQuery,
+		importQuery:      importQuery,
 		regionKinds:      regionKinds,
 	}, extensions, nil
 }
@@ -292,6 +313,29 @@ func validateCallQuery(
 	return nil, fmt.Errorf("%s call query must capture @call", languageName)
 }
 
+// validateImportQuery compiles an import query and checks its capture.
+func validateImportQuery(
+	languageName string,
+	language *tree_sitter.Language,
+	source string,
+) (*tree_sitter.Query, error) {
+	query, queryError := newQuery(language, source)
+	if queryError != nil {
+		return nil, fmt.Errorf(
+			"compile %s import query: %s",
+			languageName,
+			queryError.Message,
+		)
+	}
+	for _, capture := range query.CaptureNames() {
+		if capture == "import" {
+			return query, nil
+		}
+	}
+	query.Close()
+	return nil, fmt.Errorf("%s import query must capture @import", languageName)
+}
+
 // PresetExtensions returns the default file extensions for each built-in
 // language preset, keyed by preset name.
 func PresetExtensions() map[string][]string {
@@ -327,6 +371,7 @@ func languagePresets() map[string]languagePreset {
 				queryFunction: []string{javascriptFunctionQuery},
 				queryType:     []string{javascriptTypeQuery},
 				queryCall:     []string{javascriptCallQuery},
+				queryImport:   []string{javascriptImportQuery},
 			},
 			regions: map[CodeKind][]string{
 				CodeKindComment: []string{"comment"},
@@ -348,6 +393,7 @@ func languagePresets() map[string]languagePreset {
 				queryFunction: []string{javascriptFunctionQuery},
 				queryType:     []string{typescriptTypeQuery},
 				queryCall:     []string{javascriptCallQuery},
+				queryImport:   []string{javascriptImportQuery},
 			},
 			regions: map[CodeKind][]string{
 				CodeKindComment:   typescriptComments,
@@ -363,6 +409,7 @@ func languagePresets() map[string]languagePreset {
 				queryFunction: []string{javascriptFunctionQuery},
 				queryType:     []string{typescriptTypeQuery},
 				queryCall:     []string{javascriptCallQuery},
+				queryImport:   []string{javascriptImportQuery},
 			},
 			regions: map[CodeKind][]string{
 				CodeKindComment:   typescriptComments,
@@ -378,6 +425,7 @@ func languagePresets() map[string]languagePreset {
 				queryFunction: []string{pythonFunctionQuery},
 				queryType:     []string{pythonTypeQuery},
 				queryCall:     []string{pythonCallQuery},
+				queryImport:   []string{pythonImportQuery},
 			},
 			regions: map[CodeKind][]string{
 				CodeKindComment: []string{"comment"},
@@ -400,6 +448,7 @@ func languagePresets() map[string]languagePreset {
 				queryFunction: []string{goFunctionQuery},
 				queryType:     []string{goTypeQuery},
 				queryCall:     []string{goCallQuery},
+				queryImport:   []string{goImportQuery},
 			},
 			regions: map[CodeKind][]string{
 				CodeKindComment: []string{"comment"},
