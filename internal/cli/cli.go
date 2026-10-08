@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/codegirl-007/jevlint/internal/changed"
 	"github.com/codegirl-007/jevlint/internal/config"
@@ -35,6 +36,7 @@ Check flags:
   --concurrency number  maximum concurrent Jev requests (default 4)
   --format text|json    output format (default "text")
   --refresh-cache       reevaluate and replace current cached results
+  --timed-run           print wall-clock run time plus provider and model
 
 Eval flags:
   --clear-cache         clear this project's cached evaluations before evaluating
@@ -166,6 +168,7 @@ type checkContext struct {
 	concurrency int
 	changed     bool
 	cache       cacheMode
+	timedRun    bool
 }
 
 // loadedRun holds the config, parser, and client for a check.
@@ -364,6 +367,7 @@ func parseRunOptions(
 	concurrency := flags.Int("concurrency", defaultCheckConcurrency, "maximum concurrent Jev requests")
 	format := flags.String("format", "text", "output format")
 	refreshCache := flags.Bool("refresh-cache", false, "refresh cached evaluations")
+	timedRun := flags.Bool("timed-run", false, "print wall-clock run time for provider comparison")
 	flagArgs, paths, err := splitFlagsAndPaths(flags, args)
 	if err != nil {
 		fmt.Fprintf(stderr, "jevlint: %v\n", err)
@@ -406,6 +410,7 @@ func parseRunOptions(
 			concurrency: *concurrency,
 			changed:     *changedFiles,
 			cache:       mode,
+			timedRun:    *timedRun,
 		},
 	}, exitSuccess, true
 }
@@ -636,6 +641,11 @@ func runLoaded(
 	stdout io.Writer,
 	stderr io.Writer,
 ) int {
+	var backend evaluation.BackendInfo
+	if info, ok := loaded.evaluator.(evaluation.BackendInfo); ok {
+		backend = info
+	}
+	start := time.Now()
 	report, err := runner.Runner{
 		Extractor: loaded.extractor,
 		Evaluator: loaded.evaluator,
@@ -648,6 +658,7 @@ func runLoaded(
 		fmt.Fprintf(stderr, "jevlint: %v\n", err)
 		return exitUsageError
 	}
+	attachRunTiming(&report, start, loaded.options.check.timedRun, backend)
 	if exitCode := writeReportOrFail(
 		stdout,
 		stderr,
@@ -780,6 +791,7 @@ func writeReportTotals(writer io.Writer, report runner.Report) {
 			report.Cache.Writes,
 		)
 	}
+	writeRunTiming(writer, report.Timing)
 }
 
 // paint wraps text in a color code when color is enabled.
